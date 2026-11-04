@@ -1,19 +1,18 @@
 # pa-desktop
 
-Native GPUI desktop app (`prime-agent-ui` / `Prime Agent.app`) and agentic harness control plane for Prime Agent.
+`prime-agent-ui` is the native GPUI desktop app for Prime Agent. It talks to the `prime-agent` daemon built from the pinned [`harness/`](../../harness) submodule.
 
-## Build & Run
+## Build and run on macOS
+
+Run these commands from the repository root:
 
 ```bash
-# Build release binaries (`prime-agent` + `prime-agent-ui`) and package `dist/Prime Agent.app`
+make init
 make desktop-app
-
-# Launch the packaged macOS app bundle
 open "dist/Prime Agent.app"
-
-# Or run directly from Cargo (reuses the release cache)
-make run-desktop
 ```
+
+To run from the checkout without packaging the app, use `make run-desktop`. Both binaries share `target/`. The development launcher points the daemon at `harness/` for its Python runtime and built-in skills. The app bundle carries its own copies and does not need the checkout.
 
 ## Projects and chats
 
@@ -43,8 +42,7 @@ Project list telemetry is off unless you explicitly set `telemetry.enabled` to `
 ## Test without opening a window
 
 ```bash
-nice -n 10 cargo build --locked --release -p pa-cli --bin prime-agent
-nice -n 10 cargo test --locked --release -p pa-desktop
+make test
 ```
 
 The composer test uses GPUI's in-memory `TestWindow`. It selects a session, clicks the composer, types a prompt and presses Return. A real daemon in a temporary directory runs the scripted `faux` provider. The test checks the draft, prompt and reply without opening the app, sending OS input, or using provider credentials.

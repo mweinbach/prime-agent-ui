@@ -64,7 +64,7 @@ impl IsolatedDaemon {
             )
             .env(
                 "PI_PACKAGE_DIR",
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("../.."),
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../../harness"),
             )
             .env(pa_daemon::worker::WORKER_SUPERVISOR_LOST_EXIT_MS_ENV, "0")
             .env("DO_NOT_TRACK", "1")

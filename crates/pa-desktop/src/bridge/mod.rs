@@ -417,7 +417,7 @@ async fn ensure_supervisor_listening(
 
     let binary = locate_prime_agent_binary().ok_or_else(|| {
         anyhow!(
-            "Could not find companion `prime-agent` binary to start supervisor at {}. Build with `cargo build -p pa-cli`.",
+            "Could not find companion `prime-agent` binary to start supervisor at {}. Run `make build` from the desktop checkout.",
             socket_path.display()
         )
     })?;

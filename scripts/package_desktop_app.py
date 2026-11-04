@@ -3,7 +3,7 @@
 
 Follows strict macOS bundle sealing order:
 1. Binaries (`prime-agent-ui`, `prime-agent`) placed under `Contents/MacOS/`.
-2. Resources (`AppIcon.icns`, `prime-agent-runtime/`, `skills/`) placed under
+2. Resources (`AppIcon.icns`, `prime-agent-runtime/`, `skills/`, licenses) placed under
    `Contents/Resources/` BEFORE signing; no root symlinks, no user credentials.
 3. Ad-hoc signed with `codesign --force --deep --sign -` and verified with
    `codesign --verify --deep --strict`.
@@ -157,7 +157,7 @@ def parse_workspace_version(repo_root: Path) -> str:
         line = line.strip()
         if line.startswith('version = "'):
             return line.split('"')[1]
-    return "0.10.2"
+    raise SystemExit(f"Missing workspace version in {repo_root / 'Cargo.toml'}")
 
 
 def main() -> None:
@@ -167,13 +167,14 @@ def main() -> None:
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parent.parent
+    harness = repo_root / "harness"
     target_dir = repo_root / "target" / args.profile
     ui_bin = target_dir / "prime-agent-ui"
     cli_bin = target_dir / "prime-agent"
 
     if not ui_bin.is_file() or not cli_bin.is_file():
         raise SystemExit(
-            f"Missing built binaries in {target_dir}; build `pa-desktop` and `pa-cli` first."
+            f"Missing built binaries in {target_dir}; run `make desktop-app` from the checkout."
         )
 
     out_root = repo_root / args.out_dir
@@ -196,17 +197,32 @@ def main() -> None:
     # 2. Assemble ALL resources under Contents/Resources BEFORE signing
     build_icns(resources_dir / "AppIcon.icns")
 
-    ignore_caches = shutil.ignore_patterns("__pycache__", "*.pyc", ".pytest_cache", ".venv", ".DS_Store")
-    shutil.copytree(
-        repo_root / "prime-agent-runtime",
-        resources_dir / "prime-agent-runtime",
-        ignore=ignore_caches,
+    # Archive the submodule's committed resources instead of copying its working tree.
+    # Even files under skills/ can include local credentials or generated Python caches.
+    archive = subprocess.run(
+        [
+            "git", "-C", str(harness), "archive", "HEAD", "--",
+            "skills", "prime-agent-runtime/pyproject.toml", "prime-agent-runtime/src",
+        ],
+        stdout=subprocess.PIPE,
+        check=True,
     )
-    shutil.copytree(
-        repo_root / "skills",
-        resources_dir / "skills",
-        ignore=ignore_caches,
-    )
+    subprocess.run(["tar", "-xf", "-", "-C", str(resources_dir)], input=archive.stdout, check=True)
+
+    licenses = resources_dir / "licenses"
+    export_assets = harness / "crates/pa-core/assets/export-html"
+    for source, relative in [
+        (repo_root / "LICENSE", "desktop/LICENSE"),
+        (repo_root / "crates/pa-desktop/ICON-LICENSE", "desktop/ICON-LICENSE"),
+        (harness / "LICENSE", "harness/LICENSE"),
+        (harness / "vendor/crossterm/LICENSE", "harness/crossterm/LICENSE"),
+        (export_assets / "NOTICE.md", "harness/export-html/NOTICE.md"),
+        (export_assets / "vendor/marked.LICENSE.md", "harness/export-html/vendor/marked.LICENSE.md"),
+        (export_assets / "vendor/highlight.LICENSE", "harness/export-html/vendor/highlight.LICENSE"),
+    ]:
+        destination = licenses / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
 
     version = parse_workspace_version(repo_root)
     info = {

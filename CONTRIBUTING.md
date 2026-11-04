@@ -1,43 +1,11 @@
-# Contributing to Prime Agent
+# Contributing
 
-Thanks for your interest in contributing to Prime Agent! Prime Agent is developed in public, and we welcome bug reports, feature requests, questions, and other feedback. To keep the project maintainable, public contributions begin in [GitHub Discussions](https://github.com/PrimeIntellect-ai/prime-agent/discussions).
+Develop the GUI on a branch of `mweinbach/prime-agent-ui`. Run `make init`, then `make check`. For a shipped build, run `make desktop-app` on macOS. Tests must not activate a window on the user’s desktop or access their credentials or conversations.
 
-With the influx of agent-generated contributions, we do not review unsolicited pull requests or use public Issues as the initial intake queue. While we are open to contributions by agents, you are responsible for your code and must understand how it interacts with the entire project.
+## Harness changes
 
-## Start with a Discussion
+A recursive clone checks out `harness/` at a detached, tested commit. Do not commit there without creating a branch. Create a branch in the submodule, run its own checks, push it to `mweinbach/prime-agent`, and merge it into that fork’s `main` first. In the desktop repo, follow the [pin update instructions](README.md#how-the-repositories-fit-together). Do not add copies of harness crates, skills, or the Python runtime to the desktop repository.
 
-Choose the category that best matches what you want to share:
+To bring public upstream changes into the fork, work in a separate checkout of `mweinbach/prime-agent` (or on a named branch in `harness/`). Add `https://github.com/PrimeIntellect-ai/prime-agent.git` as `upstream` if needed, fetch `upstream/main`, and merge it into a branch based on `origin/main`. Review and test that merge before updating the fork. Do not force-reset the fork to upstream: the fork carries provider and desktop compatibility changes.
 
-- [General discussion or question](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/general)
-- [Bug report](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/bug-reports)
-- [Feature request](https://github.com/PrimeIntellect-ai/prime-agent/discussions/categories/feature-requests)
-
-Search existing Discussions before creating a new one. Include enough detail for someone else to understand and reproduce the problem, but do not share API keys, tokens, private prompts, or other sensitive information.
-
-For security vulnerabilities, report them privately to the maintainers instead of posting publicly.
-
-## Issues
-
-GitHub Issues track work that maintainers have accepted and intend to investigate or implement. A maintainer may create an Issue from a Discussion when the scope is clear and the work fits the roadmap. An existing Issue does not automatically mean that an external pull request is wanted. Wait for a maintainer to invite implementation before starting substantial work.
-
-Issues opened by unapproved contributors are automatically closed and redirected to Discussions. To contribute, share interest in Discussions or corresponding issues, and maintainers can invite implementation for requested work.
-
-## Pull Requests and Trusted Contributors
-
-Prime Agent runs on user machines and can execute code with the user's permissions. We therefore limit pull requests to maintainers and trusted contributors who have been explicitly vouched for. Maintainers may vouch for someone after they have consistently demonstrated a useful understanding of the project through Discussions, issue investigation, testing, documentation, or other collaboration. There is no separate application process and no guarantee that participation will result in approval.
-
-Pull requests from unvouched contributors are automatically closed. If you are interested in contributing code, begin with a Discussion and work with the maintainers on the problem first.
-
-## Preparing an Approved Pull Request
-
-If a maintainer has invited a pull request:
-
-1. Keep the change focused on the accepted Issue or Discussion.
-2. Follow the repository's development rules and existing conventions.
-3. Add or update tests for behavioral changes.
-4. Run the relevant checks locally and describe the validation in the pull request.
-5. Avoid unrelated refactors or dependency changes.
-
-Development rules, setup, and commands for this branch are documented in [AGENTS.md](AGENTS.md) and the Makefile gate targets (`make check`, `make deny`, `make windows-cross`).
-
-Maintainers may close a pull request that changes scope, cannot be validated safely, or no longer fits the project roadmap.
+The root Cargo workspace owns the UI and its lockfile. `harness/` is its own workspace with its own lockfile, license notices, and release process. When changing the pin, test both the resulting desktop integration and the affected harness code.

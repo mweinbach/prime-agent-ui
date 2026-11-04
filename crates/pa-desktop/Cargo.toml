@@ -10,10 +10,10 @@ name = "prime-agent-ui"
 path = "src/main.rs"
 
 [dependencies]
-pa-types = { path = "../pa-types" }
-pa-core = { path = "../pa-core" }
-pa-daemon = { path = "../pa-daemon" }
-pa-telemetry = { path = "../pa-telemetry" }
+pa-types = { path = "../../harness/crates/pa-types" }
+pa-core = { path = "../../harness/crates/pa-core" }
+pa-daemon = { path = "../../harness/crates/pa-daemon" }
+pa-telemetry = { path = "../../harness/crates/pa-telemetry" }
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit"] }
 anyhow = { workspace = true }
 futures = { workspace = true }
