@@ -1,22 +1,25 @@
-//! Project folders and their conversations. The flat outline keeps large CLI histories virtualized.
+//! Project and chat navigation. Browsing a folder never changes the open conversation.
+
+mod outline;
+mod rows;
+#[cfg(test)]
+mod tests;
 
 use gpui::{
-    AnyElement, AnyView, App, Context, FontWeight, SharedString, Window, div, prelude::*, px,
-    uniform_list,
+    AnyElement, AnyView, App, Context, Div, Focusable, FontWeight, SharedString, Stateful, Window,
+    div, prelude::*, px,
 };
 
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
-use crate::state::projects::{ProjectChat, ProjectGroup};
-use crate::state::{ActiveSessionRow, SavedSessionRow};
-use crate::theme::{Palette, ThemeMode, font_sans, font_serif};
-use crate::ui::modals::confirm_action;
+use crate::state::projects::folder_label;
+use crate::theme::{Palette, ThemeMode, font_sans};
+use crate::ui::text_input::TextInput;
 use crate::ui::workspace::PrimeDesktopView;
 
-enum OutlineRow {
-    Header(usize),
-    Chat(ProjectChat),
-}
+const ROW_HEIGHT: f32 = 30.0;
+const SIDEBAR_WIDTH: f32 = 264.0;
+pub(super) const GLOBAL_SEARCH: &str = "Search projects and chats";
 
 struct ProjectTooltip {
     text: SharedString,
@@ -55,26 +58,300 @@ pub(super) fn project_tooltip(
     }
 }
 
+impl PrimeDesktopView {
+    pub(crate) fn focus_sidebar_project(&mut self, cwd: &str, cx: &mut Context<Self>) {
+        self.set_sidebar_scope(Some(cwd.to_owned()), cx);
+    }
+
+    pub(crate) fn reveal_current_project(&mut self, cx: &mut Context<Self>) {
+        if self.current_project().is_empty() {
+            return;
+        }
+        if !self.prefs.sidebar_open {
+            self.toggle_sidebar(cx);
+        }
+        let folder = self.current_project().to_owned();
+        self.focus_sidebar_project(&folder, cx);
+    }
+
+    pub(crate) fn show_all_projects(&mut self, cx: &mut Context<Self>) {
+        self.set_sidebar_scope(None, cx);
+    }
+
+    fn set_sidebar_scope(&mut self, project: Option<String>, cx: &mut Context<Self>) {
+        self.sidebar_search_input.update(cx, |input, cx| {
+            input.set_placeholder(if project.is_some() {
+                "Search this project"
+            } else {
+                GLOBAL_SEARCH
+            });
+            input.clear(cx);
+        });
+        self.sidebar_project = project;
+        cx.notify();
+    }
+}
+
+fn icon_button(
+    id: &'static str,
+    icon: Icon,
+    label: impl Into<SharedString>,
+    palette: Palette,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .debug_selector(|| id.to_owned())
+        .size(px(28.0))
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(|s| s.bg(palette.bg_hover))
+        .active(|s| s.bg(palette.bg_selected))
+        .tooltip(project_tooltip(label.into(), palette))
+        .child(icon.render(15.0, palette.text_secondary))
+}
+
+fn titlebar(scoped: bool, p: Palette, cx: &mut Context<PrimeDesktopView>) -> impl IntoElement {
+    div()
+        .h(px(48.0))
+        .flex_none()
+        .pl(px(if cfg!(target_os = "macos") {
+            84.0
+        } else {
+            14.0
+        }))
+        .pr(px(9.0))
+        .flex()
+        .items_center()
+        .justify_between()
+        .child(if scoped {
+            div()
+                .id("sidebar-all-projects")
+                .debug_selector(|| "sidebar-all-projects".into())
+                .h(px(28.0))
+                .px(px(4.0))
+                .flex()
+                .items_center()
+                .gap(px(3.0))
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|s| s.bg(p.bg_hover))
+                .on_click(cx.listener(|view, _, _, cx| view.show_all_projects(cx)))
+                .text_size(px(12.0))
+                .text_color(p.text_secondary)
+                .child(Icon::ChevronLeft.render(13.0, p.text_muted))
+                .child("All projects")
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .text_size(px(13.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(p.text_secondary)
+                .child(Icon::Prime.render(18.0, p.accent))
+                .child("Prime Agent")
+                .into_any_element()
+        })
+        .child(
+            icon_button("sidebar-collapse-btn", Icon::Sidebar, "Hide sidebar", p)
+                .on_click(cx.listener(|view, _, _, cx| view.toggle_sidebar(cx))),
+        )
+}
+
+fn project_toolbar(
+    view: &PrimeDesktopView,
+    p: Palette,
+    cx: &mut Context<PrimeDesktopView>,
+) -> impl IntoElement {
+    let scope = view.sidebar_project.as_deref();
+    let compose_folder = folder_label(scope.unwrap_or_else(|| view.current_project()));
+    div()
+        .flex_none()
+        .px(px(12.0))
+        .pb(px(6.0))
+        .h(px(38.0))
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .child(
+            div()
+                .id("sidebar-scope")
+                .min_w_0()
+                .flex_1()
+                .pl(px(2.0))
+                .flex()
+                .items_center()
+                .gap(px(6.0))
+                .when_some(scope, |d, cwd| {
+                    d.tooltip(project_tooltip(cwd.to_owned().into(), p))
+                        .child(Icon::FolderOpen.render(16.0, p.text_secondary))
+                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_size(px(16.0))
+                        .child(scope.map_or_else(|| "Projects".to_owned(), folder_label)),
+                ),
+        )
+        .child(if let Some(cwd) = scope {
+            rows::project_pin(
+                cwd,
+                view.prefs
+                    .project_folders
+                    .iter()
+                    .any(|folder| folder == cwd),
+                p,
+                cx,
+            )
+            .size(px(28.0))
+        } else {
+            icon_button("add-project", Icon::FolderPlus, "Add project", p).on_click(
+                cx.listener(|view, _, window, cx| view.prompt_choose_project_dir(window, cx)),
+            )
+        })
+        .child(
+            icon_button(
+                "sidebar-compose",
+                Icon::Compose,
+                format!("New chat in {compose_folder}"),
+                p,
+            )
+            .on_click(cx.listener(|view, _, window, cx| view.start_fresh_session(window, cx))),
+        )
+}
+
+fn search_field(
+    view: &PrimeDesktopView,
+    window: &Window,
+    p: Palette,
+    cx: &mut Context<PrimeDesktopView>,
+) -> impl IntoElement {
+    let input = &view.sidebar_search_input;
+    div()
+        .id("sidebar-search")
+        .debug_selector(|| "sidebar-search".into())
+        .flex_none()
+        .mx(px(12.0))
+        .mb(px(9.0))
+        .h(px(30.0))
+        .pl(px(8.0))
+        .pr(px(2.0))
+        .flex()
+        .items_center()
+        .gap(px(7.0))
+        .rounded_md()
+        .border_1()
+        .border_color(p.border_subtle)
+        .bg(p.bg_canvas)
+        .when(input.focus_handle(cx).is_focused(window), |d| {
+            d.border_color(p.accent)
+        })
+        .on_click(cx.listener(|view, _, window, cx| {
+            window.focus(&view.sidebar_search_input.focus_handle(cx));
+        }))
+        .child(Icon::Search.render(14.0, p.text_muted))
+        .child(
+            div()
+                .min_w_0()
+                .flex_1()
+                .overflow_hidden()
+                .child(input.clone()),
+        )
+        .when(!input.read(cx).text().is_empty(), |d| {
+            d.child(
+                icon_button("sidebar-search-clear", Icon::Close, "Clear search", p)
+                    .size(px(24.0))
+                    .on_click(cx.listener(|view, _, window, cx| {
+                        view.sidebar_search_input.update(cx, TextInput::clear);
+                        window.focus(&view.sidebar_search_input.focus_handle(cx));
+                    })),
+            )
+        })
+}
+
+fn footer(
+    view: &PrimeDesktopView,
+    p: Palette,
+    cx: &mut Context<PrimeDesktopView>,
+) -> impl IntoElement {
+    let daemon = if view.daemon_connected {
+        view.prefs.daemon_target.label()
+    } else {
+        "Not connected"
+    };
+    let (theme_icon, theme_label) = match p.mode {
+        ThemeMode::Dark => (Icon::Sun, "Use light theme"),
+        ThemeMode::Light => (Icon::Moon, "Use dark theme"),
+    };
+    div()
+        .h(px(44.0))
+        .px(px(10.0))
+        .flex_none()
+        .border_t_1()
+        .border_color(p.border_subtle)
+        .flex()
+        .items_center()
+        .gap(px(2.0))
+        .child(
+            div()
+                .id("sidebar-settings")
+                .h(px(28.0))
+                .flex_1()
+                .min_w_0()
+                .px(px(5.0))
+                .flex()
+                .items_center()
+                .gap(px(7.0))
+                .rounded_md()
+                .cursor_pointer()
+                .hover(|s| s.bg(p.bg_hover))
+                .tooltip(project_tooltip("Connection settings".into(), p))
+                .on_click(cx.listener(|view, _, window, cx| view.open_settings_modal(window, cx)))
+                .child(div().flex_none().size(px(6.0)).rounded_full().bg(
+                    if view.daemon_connected {
+                        p.success
+                    } else {
+                        p.text_muted
+                    },
+                ))
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(11.5))
+                        .text_color(p.text_secondary)
+                        .child(daemon),
+                ),
+        )
+        .child(
+            icon_button("sidebar-refresh-btn", Icon::Refresh, "Refresh", p)
+                .on_click(cx.listener(|view, _, _, cx| view.refresh_all(cx))),
+        )
+        .child(
+            icon_button("toggle-theme-btn", theme_icon, theme_label, p)
+                .on_click(cx.listener(|view, _, _, cx| view.toggle_theme(cx))),
+        )
+        .child(
+            icon_button("open-settings-auth-btn", Icon::Sliders, "Settings", p)
+                .on_click(cx.listener(|view, _, window, cx| view.open_settings_modal(window, cx))),
+        )
+}
+
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn render_sidebar(
     view: &PrimeDesktopView,
+    window: &Window,
     palette: Palette,
     cx: &mut Context<PrimeDesktopView>,
 ) -> AnyElement {
-    let query = view.sidebar_search_input.read(cx).text();
-    let groups = view.project_groups(query);
-    let mut outline = Vec::new();
-    for (i, group) in groups.iter().enumerate() {
-        outline.push(OutlineRow::Header(i));
-        if !group.collapsed {
-            outline.extend(group.chats.iter().copied().map(OutlineRow::Chat));
-        }
-    }
-    let empty = outline.is_empty();
-
     div()
-        .w(px(256.0))
+        .w(px(SIDEBAR_WIDTH))
         .h_full()
         .flex_none()
         .flex()
@@ -82,574 +359,36 @@ pub fn render_sidebar(
         .bg(palette.bg_sidebar)
         .border_r_1()
         .border_color(palette.border_subtle)
-        // Top titlebar zone clearing native macOS traffic lights (x: 16..84)
-        .child(
-            div()
-                .h(px(52.0))
-                .flex_none()
-                .pl(px(if cfg!(target_os = "macos") {
-                    84.0
-                } else {
-                    18.0
-                }))
-                .pr(px(12.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .font_family(font_serif())
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(15.5))
-                        .text_color(palette.text_primary)
-                        .child("Prime Agent"),
-                )
-                .child(
-                    div()
-                        .id("sidebar-collapse-btn")
-                        .p(px(5.0))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(palette.bg_hover))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toggle_sidebar(cx);
-                        }))
-                        .child(Icon::Sidebar.render(15.0, palette.text_secondary)),
-                ),
-        )
-        .child(
-            div()
-                .mx(px(12.0))
-                .my(px(8.0))
-                .px(px(9.0))
-                .py(px(5.0))
-                .rounded_lg()
-                .border_1()
-                .border_color(palette.border_subtle)
-                .bg(palette.bg_canvas)
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(Icon::Search.render(13.0, palette.text_muted))
-                .child(div().flex_1().child(view.sidebar_search_input.clone())),
-        )
-        .child(
-            div()
-                .px(px(16.0))
-                .pt(px(10.0))
-                .pb(px(6.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(12.0))
-                        .text_color(palette.text_secondary)
-                        .child("Projects"),
-                )
-                .child(
-                    div()
-                        .id("add-project")
-                        .debug_selector(|| "add-project".into())
-                        .rounded_md()
-                        .px(px(6.0))
-                        .py(px(4.0))
-                        .cursor_pointer()
-                        .text_size(px(11.5))
-                        .text_color(palette.accent)
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .hover(|s| s.bg(palette.bg_hover))
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.prompt_choose_project_dir(window, cx);
-                        }))
-                        .child(Icon::Plus.render(12.0, palette.accent))
-                        .child("Add project"),
-                ),
-        )
-        .child(
-            div()
-                .px(px(7.0))
-                .min_h_0()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .overflow_hidden()
-                .when(empty, |d| {
-                    d.child(
-                        div()
-                            .px(px(10.0))
-                            .py(px(12.0))
-                            .text_size(px(12.0))
-                            .text_color(palette.text_muted)
-                            .child("No matching projects or chats."),
-                    )
-                })
-                .child(
-                    uniform_list(
-                        "project-outline",
-                        outline.len(),
-                        cx.processor(move |view, range: std::ops::Range<usize>, _, cx| {
-                            range
-                                .filter_map(|i| match outline.get(i)? {
-                                    OutlineRow::Header(index) => {
-                                        let group = groups.get(*index)?;
-                                        Some(render_project(
-                                            group,
-                                            group.folder() == Some(view.current_project()),
-                                            palette,
-                                            cx,
-                                        ))
-                                    }
-                                    OutlineRow::Chat(ProjectChat::Live(index)) => {
-                                        let row = view.active_sessions.get(*index)?;
-                                        Some(render_active_agent_row(
-                                            row,
-                                            row.active_session_id == view.session.active_session_id,
-                                            palette,
-                                            cx,
-                                        ))
-                                    }
-                                    OutlineRow::Chat(ProjectChat::Saved(index)) => {
-                                        let row = view.saved_sessions.get(*index)?;
-                                        Some(render_saved_row(
-                                            row,
-                                            view.session.session_id == row.id
-                                                || view.session.session_file.as_deref()
-                                                    == Some(row.path.as_str()),
-                                            palette,
-                                            cx,
-                                        ))
-                                    }
-                                })
-                                .collect()
-                        }),
-                    )
-                    .flex_1(),
-                )
-                .when_some(view.saved_next_cursor.clone(), |d, cursor| {
-                    d.child(
-                        div()
-                            .id("load-older-chats")
-                            .debug_selector(|| "load-older-chats".into())
-                            .rounded_md()
-                            .px(px(10.0))
-                            .py(px(6.0))
-                            .text_size(px(12.0))
-                            .text_color(palette.text_secondary)
-                            .cursor_pointer()
-                            .hover(|s| s.bg(palette.bg_hover))
-                            .on_click(cx.listener(move |this, _, _, _| {
-                                this.bridge.send(BridgeRequest::LoadOlderSessions {
-                                    cursor: cursor.clone(),
-                                });
-                            }))
-                            .child("Load older chats"),
-                    )
-                }),
-        )
-        .child(
-            div()
-                .flex_none()
-                .px(px(12.0))
-                .py(px(12.0))
-                .border_t_1()
-                .border_color(palette.border_subtle)
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .id("sidebar-settings")
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(7.0))
-                        .px(px(6.0))
-                        .py(px(5.0))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(palette.bg_hover))
-                        .on_click(
-                            cx.listener(|this, _, window, cx| this.open_settings_modal(window, cx)),
-                        )
-                        .child(
-                            div()
-                                .size(px(6.0))
-                                .rounded_full()
-                                .bg(if view.daemon_connected {
-                                    palette.success
-                                } else {
-                                    palette.text_muted
-                                }),
-                        )
-                        .child(
-                            div()
-                                .truncate()
-                                .text_size(px(12.0))
-                                .text_color(palette.text_secondary)
-                                .child(if view.daemon_connected {
-                                    view.prefs.daemon_target.label()
-                                } else {
-                                    "Not connected"
-                                }),
-                        ),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .id("sidebar-refresh-btn")
-                                .p(px(6.0))
-                                .rounded_md()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(palette.bg_hover))
-                                .on_click(cx.listener(|this, _, _, cx| this.refresh_all(cx)))
-                                .child(Icon::Refresh.render(14.0, palette.text_muted)),
-                        )
-                        .child(
-                            div()
-                                .id("open-settings-auth-btn")
-                                .p(px(6.0))
-                                .rounded_md()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(palette.bg_hover))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.open_settings_modal(window, cx);
-                                }))
-                                .child(Icon::Sliders.render(14.0, palette.text_secondary)),
-                        )
-                        .child(
-                            div()
-                                .id("toggle-theme-btn")
-                                .p(px(6.0))
-                                .rounded_md()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(palette.bg_hover))
-                                .on_click(cx.listener(|this, _, _, cx| this.toggle_theme(cx)))
-                                .child(
-                                    match palette.mode {
-                                        ThemeMode::Dark => Icon::Sun,
-                                        ThemeMode::Light => Icon::Moon,
-                                    }
-                                    .render(14.0, palette.text_secondary),
-                                ),
-                        ),
-                ),
-        )
-        .into_any_element()
-}
-
-fn render_project(
-    group: &ProjectGroup,
-    current: bool,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let key = group.key();
-    let toggle = key.to_owned();
-    let folder = group.folder();
-    let temporary = group.is_temporary();
-    let ink = if current {
-        palette.text_primary
-    } else {
-        palette.text_secondary
-    };
-    let heading = div()
-        .id(SharedString::from(format!("toggle-{key}")))
-        .debug_selector(|| format!("project-toggle-{key}"))
-        .h_full()
-        .flex_1()
-        .min_w_0()
-        .flex()
-        .items_center()
-        .gap(px(6.0))
-        .pl(px(6.0))
-        .cursor_pointer()
-        .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(&toggle, cx)))
-        .when_some(folder, |d, cwd| {
-            d.tooltip(project_tooltip(cwd.to_owned().into(), palette))
-        })
-        .when(temporary, |d| {
-            d.tooltip(project_tooltip(
-                "Saved chats from temporary folders.".into(),
-                palette,
-            ))
-        })
-        .child(
-            if group.collapsed {
-                Icon::ChevronRight
-            } else {
-                Icon::ChevronDown
-            }
-            .render(10.0, palette.text_muted),
-        )
-        .child(if temporary { Icon::Clock } else { Icon::Folder }.render(14.0, ink))
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_size(px(12.5))
-                .text_color(ink)
-                .child(group.label.clone()),
-        )
-        .when(temporary && group.collapsed, |d| {
+        .child(titlebar(view.sidebar_project.is_some(), palette, cx))
+        .child(project_toolbar(view, palette, cx))
+        .child(search_field(view, window, palette, cx))
+        .child(outline::render_outline(view, palette, cx))
+        .when_some(view.saved_next_cursor.clone(), |d, cursor| {
             d.child(
                 div()
-                    .ml_auto()
-                    .pr(px(8.0))
+                    .id("load-older-chats")
+                    .debug_selector(|| "load-older-chats".into())
+                    .mx(px(8.0))
+                    .px(px(8.0))
+                    .h(px(30.0))
                     .flex_none()
-                    .text_size(px(11.5))
-                    .text_color(palette.text_secondary)
-                    .child(group.chats.len().to_string()),
-            )
-        });
-    div()
-        .id(SharedString::from(format!("group-{key}")))
-        .group("project-row")
-        .h(px(34.0))
-        .w_full()
-        .flex()
-        .items_center()
-        .gap(px(2.0))
-        .rounded_md()
-        .when(current, |d| d.bg(palette.bg_selected))
-        .hover(|s| s.bg(palette.bg_hover))
-        .child(heading)
-        .when_some(folder, |d, cwd| {
-            let cwd = cwd.to_owned();
-            d.when(group.added, |d| {
-                let unpin = cwd.clone();
-                d.child(
-                    div()
-                        .id(SharedString::from(format!("unpin-{cwd}")))
-                        .invisible()
-                        .group_hover("project-row", gpui::Styled::visible)
-                        .flex_none()
-                        .p(px(4.0))
-                        .cursor_pointer()
-                        .rounded_sm()
-                        .hover(|s| s.bg(palette.bg_canvas))
-                        .on_click(cx.listener(move |_, _, window, cx| {
-                            let path = unpin.clone();
-                            confirm_action(
-                                &format!("Remove {path} from added projects? Its files and chats will stay where they are."),
-                                "Remove project",
-                                window,
-                                cx,
-                                move |view, cx| view.unpin_project(&path, cx),
-                            );
-                        }))
-                        .child(Icon::Close.render(10.0, palette.text_muted)),
-                )
-            })
-            .child(
-                div()
-                    .id(SharedString::from(format!("new-chat-{cwd}")))
-                    .debug_selector(|| format!("project-new-chat-{cwd}"))
-                    .flex_none()
-                    .mr(px(3.0))
-                    .p(px(5.0))
+                    .flex()
+                    .items_center()
+                    .gap(px(7.0))
                     .rounded_md()
+                    .text_size(px(12.0))
+                    .text_color(palette.text_secondary)
                     .cursor_pointer()
-                    .hover(|s| s.bg(palette.bg_canvas))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.new_project_chat(&cwd, window, cx);
+                    .hover(|s| s.bg(palette.bg_hover))
+                    .on_click(cx.listener(move |view, _, _, _| {
+                        view.bridge.send(BridgeRequest::LoadOlderSessions {
+                            cursor: cursor.clone(),
+                        });
                     }))
-                    .child(Icon::Plus.render(13.0, ink)),
+                    .child(Icon::History.render(13.0, palette.text_muted))
+                    .child("Load older chats"),
             )
         })
-        .into_any_element()
-}
-
-fn render_active_agent_row(
-    row: &ActiveSessionRow,
-    selected: bool,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let sid = row.active_session_id.clone();
-    let kill_sid = row.active_session_id.clone();
-    let kill_title = format!(
-        "Stop “{}”? Its worker and any running turn will stop.",
-        row.name
-    );
-    let dot_color = if row.is_streaming {
-        palette.warning
-    } else {
-        palette.success
-    };
-
-    div()
-        .id(SharedString::from(format!(
-            "active-row-{}",
-            row.active_session_id
-        )))
-        .debug_selector(|| "live-session".to_owned())
-        .group("chat-row")
-        .when(!row.cwd.is_empty(), |d| {
-            d.tooltip(project_tooltip(row.cwd.clone().into(), palette))
-        })
-        .h(px(34.0))
-        .pl(px(28.0))
-        .pr(px(7.0))
-        .py(px(6.0))
-        .rounded_lg()
-        .cursor_pointer()
-        .bg(if selected {
-            palette.bg_selected
-        } else {
-            gpui::transparent_black()
-        })
-        .hover(|s| {
-            if selected {
-                s.bg(palette.bg_selected)
-            } else {
-                s.bg(palette.bg_hover)
-            }
-        })
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(6.0))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.open_session(
-                BridgeRequest::AttachSession {
-                    active_session_id: sid.clone(),
-                },
-                cx,
-            );
-            cx.notify();
-        }))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(7.0))
-                .overflow_hidden()
-                .child(
-                    div()
-                        .w(px(7.0))
-                        .h(px(7.0))
-                        .flex_none()
-                        .rounded_full()
-                        .bg(dot_color),
-                )
-                .child(
-                    div()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .text_color(palette.text_primary)
-                        .child(row.name.clone()),
-                ),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!(
-                    "kill-active-{}",
-                    row.active_session_id
-                )))
-                .invisible()
-                .group_hover("chat-row", gpui::Styled::visible)
-                .p(px(5.0))
-                .rounded_sm()
-                .hover(|s| s.bg(palette.danger_soft))
-                .on_click(cx.listener(move |_this, _, window, cx| {
-                    cx.stop_propagation();
-                    let sid = kill_sid.clone();
-                    confirm_action(&kill_title, "Stop session", window, cx, move |this, _| {
-                        this.bridge.send(BridgeRequest::KillSession {
-                            active_session_id: sid,
-                        });
-                    });
-                }))
-                .child(Icon::Close.render(11.0, palette.text_muted)),
-        )
-        .into_any_element()
-}
-
-fn render_saved_row(
-    row: &SavedSessionRow,
-    selected: bool,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let open_path = row.path.clone();
-    let open_cwd = (!row.cwd.is_empty()).then(|| row.cwd.clone());
-    let del_path = row.path.clone();
-    let delete_title = format!("Permanently delete “{}” from saved chats?", row.name);
-
-    div()
-        .id(SharedString::from(format!("saved-row-{}", row.path)))
-        .debug_selector(|| "saved-chat".to_owned())
-        .group("chat-row")
-        .when(!row.cwd.is_empty(), |d| {
-            d.tooltip(project_tooltip(row.cwd.clone().into(), palette))
-        })
-        .h(px(34.0))
-        .pl(px(41.0))
-        .pr(px(7.0))
-        .py(px(6.0))
-        .rounded_lg()
-        .cursor_pointer()
-        .bg(if selected {
-            palette.bg_selected
-        } else {
-            gpui::transparent_black()
-        })
-        .hover(|s| {
-            if selected {
-                s.bg(palette.bg_selected)
-            } else {
-                s.bg(palette.bg_hover)
-            }
-        })
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(6.0))
-        .on_click(cx.listener(move |this, _, _, cx| {
-            this.open_session(
-                BridgeRequest::OpenSavedSession {
-                    session_path: open_path.clone(),
-                    cwd: open_cwd.clone(),
-                },
-                cx,
-            );
-            cx.notify();
-        }))
-        .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_size(px(12.5))
-                .text_color(palette.text_secondary)
-                .child(row.name.clone()),
-        )
-        .child(
-            div()
-                .id(SharedString::from(format!("del-saved-{}", row.id)))
-                .invisible()
-                .group_hover("chat-row", gpui::Styled::visible)
-                .p(px(5.0))
-                .rounded_sm()
-                .hover(|s| s.bg(palette.danger_soft))
-                .on_click(cx.listener(move |_this, _, window, cx| {
-                    cx.stop_propagation();
-                    let path = del_path.clone();
-                    confirm_action(&delete_title, "Delete chat", window, cx, move |this, _| {
-                        this.bridge
-                            .send(BridgeRequest::DeleteSavedSession { session_path: path });
-                    });
-                }))
-                .child(Icon::Trash.render(11.5, palette.text_muted)),
-        )
+        .child(footer(view, palette, cx))
         .into_any_element()
 }

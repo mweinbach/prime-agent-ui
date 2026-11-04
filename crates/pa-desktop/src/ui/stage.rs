@@ -75,7 +75,8 @@ pub fn render_stage(
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.start_fresh_session(window, cx);
                                     }))
-                                    .child(Icon::Plus.render(16.0, palette.text_secondary)),
+                                    .tooltip(project_tooltip("New chat".into(), palette))
+                                    .child(Icon::Compose.render(16.0, palette.text_secondary)),
                             )
                         })
                         .child(if let Some(parent_id) = view.parent_session_target() {
@@ -113,10 +114,16 @@ pub fn render_stage(
                                 .items_center()
                                 .gap(px(6.0))
                                 .when(!project_cwd.is_empty(), |d| {
-                                    d.tooltip(project_tooltip(
-                                        project_cwd.to_owned().into(),
-                                        palette,
-                                    ))
+                                    d.rounded_md()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(palette.bg_hover))
+                                        .tooltip(project_tooltip(
+                                            format!("Show project: {project_cwd}").into(),
+                                            palette,
+                                        ))
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.reveal_current_project(cx);
+                                        }))
                                 })
                                 .child(Icon::Folder.render(13.0, palette.text_muted))
                                 .child(

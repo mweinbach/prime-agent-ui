@@ -18,9 +18,13 @@ To run from the checkout without packaging the app, use `make run-desktop`. Both
 
 ## Projects and chats
 
-Use **Add project** (`⇧⌘O`) to keep a folder in the sidebar. Click a folder name to expand or collapse it, **+** beside a folder to compose there, or a chat to reopen it. `⌘N` opens the current project’s composer; switching projects keeps each unsent draft in memory. Adding a project or opening its composer does not create a CLI session. Sending a message or requesting a model for a new chat creates one.
+Use the folder-plus button (`⇧⌘O`) to add a project. It opens that folder’s composer without creating a CLI session. Your added folders and the current working folder appear first. Other directories from the CLI sit under **Folder history**. Hover over a folder and click the pin to keep it with your projects without leaving your conversation. Unpinning never deletes files or chats.
 
-Live and saved conversations appear together. A chat under an added folder belongs to the nearest added parent, but it always reopens in its original working directory. Chats outside added folders appear under their own directories, except that saved chats from temporary folders are collected under **Temporary chats**. Expand it to see the chats or use search; hover over a chat to see its original working directory. Active and explicitly added folders stay in the project list. Search works across loaded projects and chats; **Load older chats** fetches the next page. Removing an added project forgets the shortcut, not the directory or its conversations.
+Click the chevron to preview up to five chats, or click the folder name to browse all its loaded chats. Browsing a project filters the sidebar without switching the conversation or moving its draft. **All projects** takes you back. Click the folder in the chat header to reveal the open conversation’s project. Selecting a project in the Quick Switcher also opens this view. Search includes chats outside the preview and opens matching history folders; within a project it searches just that folder’s group. **Load older chats** fetches the next page from the CLI store.
+
+Use the pen beside a folder to compose there. The toolbar pen and `⌘N` compose in the project you’re browsing, or in the current conversation’s project when no project is in focus. Unsent drafts stay in memory and appear under their original folders. Sending a message or requesting a model for a new chat creates a session.
+
+Live and saved conversations appear together. A chat under an added folder belongs to its nearest added parent, but always reopens in its original working directory. Saved chats from temporary directories without an active chat, draft, or added project appear under **Temporary chats** in Folder history. Hover over a chat to see its working directory.
 
 ## Subagents
 
@@ -68,7 +72,7 @@ PA_E2E_KERNEL_PYTHON="$HOME/.prime/agent/kernel-venv/bin/python" nice -n 10 carg
 
 | Shortcut | Action |
 | --- | --- |
-| `⌘N` | New chat in the current project |
+| `⌘N` | New chat in the browsed project, or the current conversation’s project |
 | `⇧⌘O` | Add a project folder |
 | `⌘K` | Quick Switcher & command palette |
 | `⌘M` | Searchable Model Picker (Prime Inference, OpenAI Codex, Google Gemini, Anthropic, OpenAI) |

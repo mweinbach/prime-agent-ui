@@ -626,6 +626,7 @@ fn temporary_chat_can_be_found_and_reopened_after_its_folder_is_removed() {
     });
     cx.update(|window, cx| window.draw(cx).clear());
     assert!(cx.debug_bounds("saved-chat").is_none());
+    click(cx, "sidebar-history");
     click(cx, "project-toggle-\0temporary");
     click(cx, "saved-chat");
     wait_for_workspace(cx, &view, &rt, |w| {

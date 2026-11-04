@@ -421,7 +421,11 @@ fn render_quick_switcher_modal(
                         .gap(px(8.0))
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.close_modal(window, cx);
-                            this.new_project_chat(&cwd, window, cx);
+                            if !this.prefs.sidebar_open {
+                                this.toggle_sidebar(cx);
+                            }
+                            this.focus_sidebar_project(&cwd, cx);
+                            window.focus(&this.sidebar_search_input.focus_handle(cx));
                         }))
                         .child(Icon::Folder.render(14.0, palette.accent))
                         .child(project.label.clone())

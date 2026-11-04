@@ -18,6 +18,8 @@ pub(crate) struct ProjectGroup {
     pub added: bool,
     pub collapsed: bool,
     pub chats: Vec<ProjectChat>,
+    /// Exact working directories of unsent project chats, even under a nested project root.
+    pub draft_cwds: Vec<String>,
 }
 
 impl ProjectGroup {
@@ -28,6 +30,10 @@ impl ProjectGroup {
 
     pub(crate) fn folder(&self) -> Option<&str> {
         self.folder.as_deref().filter(|cwd| !cwd.is_empty())
+    }
+
+    pub(crate) fn is_project(&self, current: &str) -> bool {
+        self.added || self.folder() == Some(current)
     }
 
     pub(crate) fn is_temporary(&self) -> bool {
@@ -102,6 +108,12 @@ fn qualify_duplicate_labels(groups: &mut [ProjectGroup]) {
     }
 }
 
+enum GroupEntry {
+    Folder,
+    Draft,
+    Chat(ProjectChat),
+}
+
 impl DesktopPreferences {
     /// An added nested folder wins over its parent. Do not resolve symlinks or touch disk on paint.
     pub(crate) fn project_for<'a>(&'a self, cwd: &'a str) -> &'a str {
@@ -113,11 +125,12 @@ impl DesktopPreferences {
             .map_or(cwd, String::as_str)
     }
 
-    pub(crate) fn groups(
+    pub(crate) fn groups<'a>(
         &self,
         current: &str,
         live: &[ActiveSessionRow],
         saved: &[SavedSessionRow],
+        draft_cwds: impl IntoIterator<Item = &'a str>,
         query: &str,
     ) -> Vec<ProjectGroup> {
         let query = query.trim().to_lowercase();
@@ -125,18 +138,25 @@ impl DesktopPreferences {
         let mut groups = Vec::<ProjectGroup>::new();
         let mut positions = HashMap::<Option<String>, usize>::new();
         let temp_dir = std::env::temp_dir();
-        let live_roots: HashSet<_> = live
+        let mut drafts: Vec<_> = draft_cwds
+            .into_iter()
+            .filter(|cwd| !cwd.is_empty())
+            .collect();
+        drafts.sort_unstable();
+        drafts.dedup();
+        let open_roots: HashSet<_> = live
             .iter()
             .filter(|row| row.rlm_depth == 0)
             .map(|row| self.project_for(&row.cwd))
+            .chain(drafts.iter().copied().map(|cwd| self.project_for(cwd)))
             .collect();
-        let mut insert = |cwd: &str, chat: Option<ProjectChat>| {
+        let mut insert = |cwd: &str, entry: GroupEntry| {
             let root = self.project_for(cwd);
             let added = self.project_folders.iter().any(|p| p == root);
-            let temporary = matches!(chat, Some(ProjectChat::Saved(_)))
+            let temporary = matches!(entry, GroupEntry::Chat(ProjectChat::Saved(_)))
                 && !added
                 && root != current
-                && !live_roots.contains(root)
+                && !open_roots.contains(root)
                 && is_temp_folder(Path::new(root), &temp_dir);
             let folder = (!temporary).then(|| root.to_owned());
             let ix = *positions.entry(folder.clone()).or_insert_with(|| {
@@ -150,6 +170,7 @@ impl DesktopPreferences {
                     added,
                     collapsed: false,
                     chats: Vec::new(),
+                    draft_cwds: Vec::new(),
                 };
                 group.collapsed = !searching
                     && self
@@ -160,65 +181,29 @@ impl DesktopPreferences {
                 groups.push(group);
                 groups.len() - 1
             });
-            if let Some(chat) = chat {
-                groups[ix].chats.push(chat);
+            match entry {
+                GroupEntry::Folder => {}
+                GroupEntry::Draft => groups[ix].draft_cwds.push(cwd.to_owned()),
+                GroupEntry::Chat(chat) => groups[ix].chats.push(chat),
             }
         };
         for root in &self.project_folders {
-            insert(root, None);
+            insert(root, GroupEntry::Folder);
         }
-        insert(current, None);
-        let mut ids = HashMap::new();
-        let mut files = HashMap::new();
-        let mut visible_live = HashSet::new();
-        for (index, row) in live
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.rlm_depth == 0)
-        {
-            if let Some(id) = &row.session_id {
-                ids.insert(id.as_str(), index);
-            }
-            if let Some(file) = &row.session_file {
-                files.insert(file.as_str(), index);
-            }
-            if !searching
-                || [&row.cwd, &row.name]
-                    .iter()
-                    .any(|value| value.to_lowercase().contains(&query))
-            {
-                insert(&row.cwd, Some(ProjectChat::Live(index)));
-                visible_live.insert(index);
+        insert(current, GroupEntry::Folder);
+        for cwd in drafts {
+            if !searching || cwd.to_lowercase().contains(&query) {
+                insert(cwd, GroupEntry::Draft);
             }
         }
-        for (index, row) in saved
-            .iter()
-            .enumerate()
-            .filter(|(_, row)| row.rlm_depth == 0)
-        {
-            if searching
-                && ![&row.cwd, &row.name, &row.first_message]
-                    .iter()
-                    .any(|value| value.to_lowercase().contains(&query))
-            {
-                continue;
-            }
-            // Even a search that only matched persisted metadata must open the owning worker.
-            if let Some(&i) = files
-                .get(row.path.as_str())
-                .or_else(|| ids.get(row.id.as_str()))
-            {
-                if visible_live.insert(i) {
-                    insert(&live[i].cwd, Some(ProjectChat::Live(i)));
-                }
-            } else {
-                insert(&row.cwd, Some(ProjectChat::Saved(index)));
-            }
-        }
+        insert_matching_chats(live, saved, &query, |cwd, chat| {
+            insert(cwd, GroupEntry::Chat(chat));
+        });
         qualify_duplicate_labels(&mut groups);
         if searching {
             groups.retain(|g| {
                 !g.chats.is_empty()
+                    || !g.draft_cwds.is_empty()
                     || g.label.to_lowercase().contains(&query)
                     || g.folder()
                         .is_some_and(|cwd| cwd.to_lowercase().contains(&query))
@@ -229,6 +214,62 @@ impl DesktopPreferences {
             groups.push(history);
         }
         groups
+    }
+}
+
+fn insert_matching_chats(
+    live: &[ActiveSessionRow],
+    saved: &[SavedSessionRow],
+    query: &str,
+    mut insert: impl FnMut(&str, ProjectChat),
+) {
+    let searching = !query.is_empty();
+    let mut ids = HashMap::new();
+    let mut files = HashMap::new();
+    let mut visible_live = HashSet::new();
+    for (index, row) in live
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.rlm_depth == 0)
+    {
+        if let Some(id) = &row.session_id {
+            ids.insert(id.as_str(), index);
+        }
+        if let Some(file) = &row.session_file {
+            files.insert(file.as_str(), index);
+        }
+        if !searching
+            || [&row.cwd, &row.name]
+                .iter()
+                .any(|value| value.to_lowercase().contains(query))
+        {
+            insert(&row.cwd, ProjectChat::Live(index));
+            visible_live.insert(index);
+        }
+    }
+    for (index, row) in saved
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| row.rlm_depth == 0)
+    {
+        if searching
+            && ![&row.cwd, &row.name, &row.first_message]
+                .iter()
+                .any(|value| value.to_lowercase().contains(query))
+        {
+            continue;
+        }
+        // Even a search that only matched persisted metadata must open the owning worker.
+        if let Some(&i) = files
+            .get(row.path.as_str())
+            .or_else(|| ids.get(row.id.as_str()))
+        {
+            if visible_live.insert(i) {
+                insert(&live[i].cwd, ProjectChat::Live(i));
+            }
+        } else {
+            insert(&row.cwd, ProjectChat::Saved(index));
+        }
     }
 }
 
@@ -254,7 +295,15 @@ mod tests {
             saved(3, "/var/folders/y0/uid/C/normal"),
             saved(4, "/work/live"),
         ];
-        let groups = prefs.groups("/work/live", &[], &rows, "");
+        let groups = prefs.groups("/work/live", &[], &rows, [], "");
+        assert_eq!(
+            groups
+                .iter()
+                .filter(|group| group.is_project("/work/live"))
+                .filter_map(ProjectGroup::folder)
+                .collect::<Vec<_>>(),
+            [keep, "/work/live"],
+        );
         let history = groups.last().unwrap();
         assert!(history.is_temporary() && history.collapsed && history.folder().is_none());
         assert_eq!(
@@ -268,12 +317,28 @@ mod tests {
                 .collect::<Vec<_>>(),
             [keep, "/work/live", "/var/folders/y0/uid/C/normal"]
         );
-        let groups = prefs.groups("/work/live", &[], &rows, ".tmpTwo");
+        let groups = prefs.groups("/work/live", &[], &rows, [], ".tmpTwo");
         let [found] = groups.as_slice() else {
             panic!("expected one matching group")
         };
         assert!(found.is_temporary() && !found.collapsed);
         assert_eq!(found.chats, [ProjectChat::Saved(1)]);
+    }
+
+    #[test]
+    fn draft_paths_stay_distinct_under_their_deepest_root() {
+        let prefs = DesktopPreferences {
+            project_folders: vec!["/work".into(), "/work/api".into()],
+            ..Default::default()
+        };
+        let drafts = ["/work/api/z", "/work/api/a", "/work/api/z", "/work/app"];
+        let groups = prefs.groups("/work", &[], &[], drafts, "");
+        assert_eq!(groups[0].draft_cwds, ["/work/app"]);
+        assert_eq!(groups[1].draft_cwds, ["/work/api/a", "/work/api/z"]);
+        let groups = prefs.groups("/work", &[], &[], drafts, "api/z");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].folder(), Some("/work/api"));
+        assert_eq!(groups[0].draft_cwds, ["/work/api/z"]);
     }
 
     #[test]
@@ -287,7 +352,7 @@ mod tests {
             project_folders: paths.map(str::to_owned).into(),
             ..Default::default()
         };
-        let groups = prefs.groups(paths[0], &[], &[], "");
+        let groups = prefs.groups(paths[0], &[], &[], [], "");
         assert_eq!(
             groups.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(),
             ["src · alpha/backend", "src · beta/backend", "src · web"]
@@ -305,7 +370,7 @@ mod tests {
         let live = [live];
         let saved = [archived];
         for query in ["", "earlier"] {
-            let groups = prefs.groups("/work", &live, &saved, query);
+            let groups = prefs.groups("/work", &live, &saved, [], query);
             let rows: Vec<_> = groups
                 .iter()
                 .filter(|g| !g.chats.is_empty())

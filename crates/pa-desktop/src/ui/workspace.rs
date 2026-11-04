@@ -176,6 +176,9 @@ pub struct PrimeDesktopView {
     pub active_sessions: Vec<ActiveSessionRow>,
     pub saved_sessions: Vec<SavedSessionRow>,
     pub(crate) saved_next_cursor: Option<String>,
+    /// A sidebar filter, independent of the conversation open in the stage.
+    pub(super) sidebar_project: Option<String>,
+    pub(super) sidebar_history_open: bool,
 
     pub session: AttachedSessionState,
     selection: SessionSelection,
@@ -283,7 +286,7 @@ impl PrimeDesktopView {
 
         let composer_input = TextInput::new(cx, InputKind::Composer, "Message Prime Agent…");
         let sidebar_search_input =
-            TextInput::new(cx, InputKind::SingleLine, "Search projects and chats…");
+            TextInput::new(cx, InputKind::SingleLine, crate::ui::sidebar::GLOBAL_SEARCH);
         let modal_search_input = TextInput::new(
             cx,
             InputKind::SingleLine,
@@ -386,6 +389,8 @@ impl PrimeDesktopView {
             active_sessions: Vec::new(),
             saved_sessions: Vec::new(),
             saved_next_cursor: None,
+            sidebar_project: None,
+            sidebar_history_open: false,
             session: AttachedSessionState::default(),
             selection: SessionSelection::Idle,
             auto_attach,
@@ -1715,6 +1720,17 @@ impl Render for PrimeDesktopView {
             .on_action(cx.listener(move |this, _: &DismissOverlay, window, cx| {
                 if this.active_modal.is_some() || this.renaming_session {
                     this.close_modal(window, cx);
+                } else if this.prefs.sidebar_open
+                    && this
+                        .sidebar_search_input
+                        .focus_handle(cx)
+                        .is_focused(window)
+                {
+                    if this.sidebar_search_input.read(cx).text().is_empty() {
+                        window.focus(&this.composer_input.focus_handle(cx));
+                    } else {
+                        this.sidebar_search_input.update(cx, TextInput::clear);
+                    }
                 } else if inspector_overlay {
                     this.toggle_inspector(cx);
                 } else if sidebar_overlay {
@@ -1733,7 +1749,7 @@ impl Render for PrimeDesktopView {
                     .flex_row()
                     .overflow_hidden()
                     .when(sidebar_docked, |d| {
-                        d.child(render_sidebar(self, palette, cx))
+                        d.child(render_sidebar(self, window, palette, cx))
                     })
                     .child(render_stage(self, palette, sidebar_docked, cx))
                     .when(inspector_docked, |d| {
@@ -1744,7 +1760,7 @@ impl Render for PrimeDesktopView {
                 let panel = if inspector_overlay {
                     render_inspector(self, palette, cx)
                 } else {
-                    render_sidebar(self, palette, cx)
+                    render_sidebar(self, window, palette, cx)
                 };
                 d.child(
                     div()
