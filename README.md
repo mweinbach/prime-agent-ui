@@ -1,3 +1,20 @@
+# Prime Agent Desktop
+
+An unofficial native macOS client for [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), built with [GPUI](https://www.gpui.rs/). It uses the Prime Agent daemon and reads the same saved chats and provider credentials as the CLI. Credentials and conversations are not distributed in this repository.
+
+On a Mac with Rust, Xcode, and the Metal toolchain installed:
+
+```sh
+make desktop-app
+open "dist/Prime Agent.app"
+```
+
+See the [desktop guide](crates/pa-desktop/README.md) for projects, subagents, CLI data, and headless testing. The local build is ad-hoc signed, not notarized. The installation and release links in the upstream README below are for the CLI, not this desktop app.
+
+**Licenses:** [Prime Agent](LICENSE) · [Desktop icons](crates/pa-desktop/ICON-LICENSE) · [HTML export assets](crates/pa-core/assets/export-html/NOTICE.md).
+
+---
+
 <p align="center">
   <a href="https://primeintellect.ai">
     <picture>
@@ -37,6 +54,12 @@ Prime Agent is an open-source coding and research agent for general and long-run
 
 - The **[Recursive Language Model (RLM)](https://www.primeintellect.ai/blog/rlm)** treats context as variables (*prompt-as-a-variable*) and tools like recursive subagents as function calls (*programmatic tool /sub-agent calling*) inside a persistent REPL.
 - The **[Continual Harness](https://arxiv.org/abs/2605.09998)** stores supplemental prompts, memories, skill descriptions, and reusable subagent specifications as durable state that Prime Agent can refine through small, evidence-backed updates, local to the session by default.
+
+## Desktop app (macOS)
+
+Open the local build with `open "dist/Prime Agent.app"`. To build or update it, run `make desktop-app` on a Mac with Xcode and the Metal toolchain installed. The bundle includes the GPUI window and the companion `prime-agent` executable; it does not package your credentials.
+
+Choose a project folder before starting work. The agent can run commands and change files there with your user permissions. The desktop uses its own daemon socket by default, but reads the same Prime Agent credentials and saved conversations as the terminal. See [desktop controls and shortcuts](crates/pa-desktop/README.md).
 
 ## Install
 

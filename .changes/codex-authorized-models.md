@@ -1,0 +1,1 @@
+- Send Codex CLI client metadata (`codex_cli_rs` 0.167.0) on Codex requests and model discovery, and refresh the model picker with the Codex and Gemini models authorized for your configured credentials.

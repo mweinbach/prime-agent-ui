@@ -16,13 +16,23 @@ use url::Url;
 use super::callback::CodexCallbackServer;
 use super::CodexHttp;
 
+/// Pinned Codex CLI version for client identity and model discovery.
+pub const CODEX_CLIENT_VERSION: &str = "0.167.0";
 pub const OPENAI_CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
 const TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
 /// The registered redirect: the callback server's own address.
 const REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
 const SCOPE: &str = "openid profile email offline_access";
-pub const DEFAULT_ORIGINATOR: &str = "pi";
+pub const DEFAULT_ORIGINATOR: &str = "codex_cli_rs";
+
+/// `User-Agent` value matching the Codex CLI wire format (`codex_cli_rs/<version> (<os>; <arch>)`).
+#[must_use]
+pub fn codex_user_agent() -> String {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    format!("{DEFAULT_ORIGINATOR}/{CODEX_CLIENT_VERSION} ({os}; {arch})")
+}
 pub const DEFAULT_TOKEN_TIMEOUT_MS: u64 = 30_000;
 /// The refresh runs under the auth storage's file lock, which a peer declares stale after 10
 /// seconds; the request must fit inside that window.
@@ -971,7 +981,7 @@ mod tests {
 
     #[test]
     fn the_authorization_url_carries_the_ts_parameters() {
-        let url = authorization_url("the-challenge", "the-state", "pi");
+        let url = authorization_url("the-challenge", "the-state", DEFAULT_ORIGINATOR);
         let parsed = url::Url::parse(&url).unwrap();
         assert_eq!(parsed.host_str(), Some("auth.openai.com"));
         assert_eq!(parsed.path(), "/oauth/authorize");
@@ -991,7 +1001,7 @@ mod tests {
         assert_eq!(param("state"), "the-state");
         assert_eq!(param("id_token_add_organizations"), "true");
         assert_eq!(param("codex_cli_simplified_flow"), "true");
-        assert_eq!(param("originator"), "pi");
+        assert_eq!(param("originator"), "codex_cli_rs");
     }
 
     #[tokio::test]

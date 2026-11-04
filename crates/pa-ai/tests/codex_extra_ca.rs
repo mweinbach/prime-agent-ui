@@ -72,6 +72,18 @@ async fn the_first_codex_websocket_trusts_node_extra_ca_certs() {
             |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
                 assert_eq!(request.uri().path(), "/codex/responses");
                 assert_eq!(request.headers()["chatgpt-account-id"], "fixture-account");
+                assert_eq!(
+                    request.headers()["originator"],
+                    pa_ai::oauth::DEFAULT_ORIGINATOR
+                );
+                assert_eq!(
+                    request.headers()["version"],
+                    pa_ai::oauth::CODEX_CLIENT_VERSION
+                );
+                assert_eq!(
+                    request.headers()["user-agent"],
+                    pa_ai::oauth::codex_user_agent()
+                );
                 Ok(response)
             },
         )

@@ -212,6 +212,26 @@ impl AgentInstallationStage {
     }
 }
 
+/// Explicit adoption actions in desktop project navigation. No project or chat identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopProjectAction {
+    Added,
+    Removed,
+}
+
+impl DesktopProjectAction {
+    /// Record only the action and the common event metadata.
+    pub fn track(self, client: &TelemetryClient) {
+        let action = match self {
+            Self::Added => "added",
+            Self::Removed => "removed",
+        };
+        let mut properties = crate::base_properties("interactive");
+        properties.set("action", Value::from(action));
+        client.track(crate::catalog::DESKTOP_PROJECT_ACTION.name, properties);
+    }
+}
+
 /// `update_homebrew_refusal`: an installer update rejected because Homebrew
 /// owns the executable. Only the fixed formula/cask layout kind is recorded.
 #[derive(Debug, Clone, Copy)]

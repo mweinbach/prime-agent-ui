@@ -8,7 +8,7 @@ storage key - the share-viewer service injects those, so they must stay).
 
 Vendored JavaScript (kept byte-identical, minified upstream):
 
-- `vendor/marked.min.js` - marked, MIT License, https://github.com/markedjs/marked
-- `vendor/highlight.min.js` - highlight.js, BSD-3-Clause License, https://highlightjs.org
+- `vendor/marked.min.js` - marked, [license](vendor/marked.LICENSE.md), https://github.com/markedjs/marked
+- `vendor/highlight.min.js` - highlight.js, [BSD-3-Clause license](vendor/highlight.LICENSE), https://highlightjs.org
 
 Both are embedded into every exported HTML file by the exporter.

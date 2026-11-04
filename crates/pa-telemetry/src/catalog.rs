@@ -994,6 +994,16 @@ const TUI_IPYTHON_BASH_RENDERED: EventRule = EventRule {
     ],
 };
 
+/// An explicit action in the desktop project navigation.
+pub(crate) const DESKTOP_PROJECT_ACTION: EventRule = EventRule {
+    name: "desktop project action",
+    since: 2,
+    properties: &[(
+        "action",
+        required(enum_rule(&["added", "removed", "unknown"], "unknown")),
+    )],
+};
+
 /// `tui exit` (v1, enriched): one per interactive session run (each agents
 /// view handoff ends one), carrying that run's adoption counters (the TUI
 /// interactions, the client-side feature outcomes, the input-stage counts
@@ -1261,6 +1271,7 @@ pub fn catalog() -> Vec<&'static EventRule> {
         &SESSION_ARCHIVED,
         &TUI_EXIT,
         &TUI_IPYTHON_BASH_RENDERED,
+        &DESKTOP_PROJECT_ACTION,
     ];
     all.extend(UPDATE_EVENTS.iter());
     all
@@ -1515,6 +1526,17 @@ mod tests {
         let _ = sanitize("agent run completed", &mut properties);
         assert_eq!(properties.get("error_category"), Some(&Value::Null));
         assert!(properties.get("compaction_count").is_none());
+    }
+
+    #[test]
+    fn desktop_project_action_removes_project_data() {
+        let mut properties = Properties::new();
+        properties.set("action", json!("/private/project"));
+        properties.set("project_path", json!("/private/project"));
+        sanitize("desktop project action", &mut properties);
+        let mut expected = Properties::new();
+        expected.set("action", json!("unknown"));
+        assert_eq!(properties, expected);
     }
 
     #[test]

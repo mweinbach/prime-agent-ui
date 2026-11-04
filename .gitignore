@@ -9,4 +9,5 @@ clippy-*.log
 fmt-*.log
 tests-*.log
 test-compile-*.log
-
+/dist/
+.DS_Store

@@ -4,9 +4,9 @@
 use base64::Engine as _;
 use serde_json::Value;
 
-use crate::utils_inner::diagnostics::now_ms;
-
+use crate::oauth::{codex_user_agent, CODEX_CLIENT_VERSION, DEFAULT_ORIGINATOR};
 use crate::providers::openai_codex_responses::websocket::OPENAI_BETA_RESPONSES_WEBSOCKETS;
+use crate::utils_inner::diagnostics::now_ms;
 
 pub const DEFAULT_CODEX_BASE_URL: &str = "https://chatgpt.com/backend-api";
 pub const JWT_CLAIM_PATH: &str = "https://api.openai.com/auth";
@@ -79,8 +79,9 @@ pub fn build_sse_headers(
     }
     set_header(&mut headers, "Authorization", &format!("Bearer {token}"));
     set_header(&mut headers, "chatgpt-account-id", account_id);
-    set_header(&mut headers, "originator", "pi");
-    set_header(&mut headers, "User-Agent", &platform_user_agent());
+    set_header(&mut headers, "originator", DEFAULT_ORIGINATOR);
+    set_header(&mut headers, "User-Agent", &codex_user_agent());
+    set_header(&mut headers, "version", CODEX_CLIENT_VERSION);
     set_header(&mut headers, "OpenAI-Beta", "responses=experimental");
     set_header(&mut headers, "accept", "text/event-stream");
     set_header(&mut headers, "content-type", "application/json");
@@ -107,8 +108,9 @@ pub fn build_websocket_headers(
     }
     set_header(&mut headers, "Authorization", &format!("Bearer {token}"));
     set_header(&mut headers, "chatgpt-account-id", account_id);
-    set_header(&mut headers, "originator", "pi");
-    set_header(&mut headers, "User-Agent", &platform_user_agent());
+    set_header(&mut headers, "originator", DEFAULT_ORIGINATOR);
+    set_header(&mut headers, "User-Agent", &codex_user_agent());
+    set_header(&mut headers, "version", CODEX_CLIENT_VERSION);
     // The WebSocket handshake drops the SSE beta header (matches the TS `delete
     // wsHeaders["OpenAI-Beta"]`).
     set_header(
@@ -125,13 +127,6 @@ pub fn build_websocket_headers(
 fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
     headers.retain(|(existing, _)| !existing.eq_ignore_ascii_case(name));
     headers.push((name.to_string(), value.to_string()));
-}
-
-/// The `User-Agent` builder: `pi (<platform> <release>; <arch>)`.
-fn platform_user_agent() -> String {
-    let os = std::env::consts::OS;
-    let arch = std::env::consts::ARCH;
-    format!("pi ({os}; {arch})")
 }
 
 #[cfg(test)]
@@ -199,9 +194,13 @@ mod tests {
                 .map(|(_, value)| value.as_str())
                 .unwrap_or_default()
         };
+        let expected_ua = codex_user_agent();
+        assert!(expected_ua.starts_with("codex_cli_rs/0.167.0 ("));
         assert_eq!(get("Authorization"), "Bearer tok");
         assert_eq!(get("chatgpt-account-id"), "acct");
-        assert_eq!(get("originator"), "pi");
+        assert_eq!(get("originator"), "codex_cli_rs");
+        assert_eq!(get("User-Agent"), expected_ua);
+        assert_eq!(get("version"), CODEX_CLIENT_VERSION);
         assert_eq!(get("OpenAI-Beta"), "responses=experimental");
         assert_eq!(get("accept"), "text/event-stream");
         assert_eq!(get("content-type"), "application/json");
@@ -219,6 +218,9 @@ mod tests {
                 .map(|(_, value)| value.as_str())
                 .unwrap_or_default()
         };
+        assert_eq!(get("originator"), "codex_cli_rs");
+        assert_eq!(get("User-Agent"), codex_user_agent());
+        assert_eq!(get("version"), CODEX_CLIENT_VERSION);
         assert_eq!(get("OpenAI-Beta"), OPENAI_BETA_RESPONSES_WEBSOCKETS);
         assert_eq!(get("session_id"), "req-1");
         assert!(!headers

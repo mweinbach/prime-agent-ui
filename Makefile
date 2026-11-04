@@ -206,4 +206,13 @@ legacy-upgrade-gates:
 	python3 scripts/release/test_native_compat.py
 	python3 scripts/release/test_npm_bridge.py
 
-.PHONY: legacy-upgrade-gates
+.PHONY: legacy-upgrade-gates desktop-app run-desktop
+
+# Build native GPUI desktop app + core harness binary and package signed macOS `dist/Prime Agent.app`.
+desktop-app:
+	nice -n 10 cargo build --release -p pa-cli --bin prime-agent -p pa-desktop --bin prime-agent-ui
+	python3 scripts/package_desktop_app.py --profile release --out-dir dist
+
+run-desktop:
+	nice -n 10 cargo build --locked --release -p pa-cli --bin prime-agent -p pa-desktop --bin prime-agent-ui
+	./target/release/prime-agent-ui

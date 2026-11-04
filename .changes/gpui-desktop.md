@@ -1,0 +1,1 @@
+- Organize CLI conversations by project in the native macOS app and follow spawned subagents from a parent chat into their live transcripts and results.

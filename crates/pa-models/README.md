@@ -1,7 +1,7 @@
 # pa-models
 
 The live model catalog subsystem: fetch layer, no-cold-start chain, strict
-schemas, transport pinning, and the credentialed Prime Inference catalog.
+schemas, transport pinning, and the credentialed Prime Inference, Codex, and Gemini catalogs.
 Port of the TS catalog client (branch `feat/catalog-client`:
 `model-catalog-cache.ts`, `model-catalog.ts`, `model-compat-schema.ts`,
 `provider-model-catalog.ts`, `bundled-model-catalog.ts`,
@@ -24,6 +24,19 @@ Port of the TS catalog client (branch `feat/catalog-client`:
   headers.
 - Prime Inference: live credentialed fetch, scope-keyed disk cache
   (HMAC-SHA256 of key over team), 401/403 clears only that scope.
+- Codex: ChatGPT-authorized `/backend-api/codex/models` discovery, using
+  the shared Codex client version. Listed models replace the bundled Codex
+  list, including an empty result. Each account and token has a separate
+  HMAC-SHA256-scoped last-good snapshot; tokens and account ids never enter
+  snapshot metadata or filenames. Offline and transient failures retain
+  last-good data; 401/403 clears only the rejected scope.
+  `supported_in_api` does not filter ChatGPT OAuth models, matching Codex.
+  Hidden models and models without text input are excluded. Context and
+  input capabilities override compiled defaults; only declared reasoning
+  efforts become controls. Unknown slugs use the compiled Codex context
+  and output limits when not reported, and zero cost because the endpoint
+  reports no pricing. All returned models keep the compiled Codex
+  provider, API, and base URL; response headers cannot retarget requests.
 - Refresh: hourly + startup + picker open + auth change; fire-and-forget;
   coalesced per source; a mid-session refresh never retargets the active
   model.
@@ -59,6 +72,11 @@ Port of the TS catalog client (branch `feat/catalog-client`:
   build_prime_inference_models, merge_prime_inference_models,
   parse_prime_inference_model_catalog, is_private_prime_inference_model_id,
   scope_key, PRIME_INFERENCE_BASE_URL}`
+- `openai_codex::{CodexCatalog, CodexCredentials}` and
+  `google::{GoogleCatalog, GoogleCredentials}`: `new(models_dir)`,
+  `with_base_url(models_dir, base_url)` for local HTTP verification,
+  `get(credentials)`, `refresh(credentials, force)`, and `scope_for(credentials)`.
+  The base URL override changes discovery only, never model transports.
 - `offline::is_catalog_offline`
 
 ## Dependencies (direction compliance)

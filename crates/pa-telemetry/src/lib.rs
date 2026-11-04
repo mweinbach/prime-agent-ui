@@ -59,8 +59,8 @@ pub use client::{TelemetryClient, TelemetryClientConfig};
 pub use env::parse_bool_override;
 pub use event::TelemetryEvent;
 pub use events::{
-    AgentInstallationStage, AgentStartupStage, OnboardingStage, RunTrigger, ToolCategory,
-    UpdateHomebrewRefusal,
+    AgentInstallationStage, AgentStartupStage, DesktopProjectAction, OnboardingStage, RunTrigger,
+    ToolCategory, UpdateHomebrewRefusal,
 };
 pub use install_id::{existing_install_id, install_id};
 pub use platform::{base_properties, SCHEMA_VERSION};

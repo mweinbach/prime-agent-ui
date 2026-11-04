@@ -11,6 +11,7 @@ members = [
     "crates/pa-tui",
     "crates/pa-cli",
     "crates/pa-perf",
+    "crates/pa-desktop",
 ]
 
 # Crossterm 0.28.1's kitty support check holds the process-wide event reader
@@ -136,6 +137,15 @@ used_underscore_binding = "warn"
 # darwin builds keep line tables in the executable (dSYM extraction is a
 # documented follow-up); byte claims are measured on Linux x86_64 ELF
 # only.
+# Keep target/debug small (~75% less disk) and GPUI rendering fast in dev builds
+# without stripping panic file:line backtraces from workspace crates.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 1
+debug = false
+
 [profile.release]
 lto = "thin"
 codegen-units = 4

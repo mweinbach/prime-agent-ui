@@ -1,0 +1,105 @@
+# pa-desktop
+
+Native GPUI desktop app (`prime-agent-ui` / `Prime Agent.app`) and agentic harness control plane for Prime Agent.
+
+## Build & Run
+
+```bash
+# Build release binaries (`prime-agent` + `prime-agent-ui`) and package `dist/Prime Agent.app`
+make desktop-app
+
+# Launch the packaged macOS app bundle
+open "dist/Prime Agent.app"
+
+# Or run directly from Cargo (reuses the release cache)
+make run-desktop
+```
+
+## Projects and chats
+
+Use **Add project** (`⇧⌘O`) to keep a folder in the sidebar. Click a folder name to expand or collapse it, **+** beside a folder to compose there, or a chat to reopen it. `⌘N` opens the current project’s composer; switching projects keeps each unsent draft in memory. Adding a project or opening its composer does not create a CLI session. Sending a message or requesting a model for a new chat creates one.
+
+Live and saved conversations appear together. A chat under an added folder belongs to the nearest added parent, but it always reopens in its original working directory. Chats outside added folders appear under their own directories, except that saved chats from temporary folders are collected under **Temporary chats**. Expand it to see the chats or use search; hover over a chat to see its original working directory. Active and explicitly added folders stay in the project list. Search works across loaded projects and chats; **Load older chats** fetches the next page. Removing an added project forgets the shortcut, not the directory or its conversations.
+
+## Subagents
+
+When a chat spawns a subagent, **Subagents** in the chat header opens **Inspector → Agents**. The list belongs to the current chat, not the whole project. Cards show the reported run status, task and result. Progress notes and tool counts appear when the worker reports them. **Inspect live** opens a resident child’s chat; **Parent** returns to its parent. For nested agents, inspect the child and open its own Agents tab.
+
+You can message a resident child, cancel a running child, or remove a settled child. A retained result can still be shown when the worker is no longer live. Subagents do not become separate projects in the sidebar.
+
+## Use your Prime Agent CLI data
+
+Desktop opens the same data as `prime-agent`: `~/.prime/agent` by default, or `PRIME_AGENT_CODING_AGENT_DIR` when set in its environment. There is no second copy of your chats or credentials.
+
+- **Conversations:** The project sidebar lists conversations directly from the CLI store. Opening one resumes its original file.
+- **Credentials and models:** Open **Settings** (`⌘,`) to see stored API keys and OAuth sign-ins by provider, including custom providers from `models.json`. Key values and tokens aren't displayed. Editing a saved key changes it for both clients. Shell-only environment variables may not reach an app opened from Finder. Launch the binary from that shell to inherit them, or save a key through the CLI.
+- **Custom data folder:** In **Settings → Prime Agent CLI data → Choose folder…**, select the agent directory that contains `auth.json`, `sessions/` or `settings.json`, not a project checkout. Desktop remembers the folder on this Mac and uses a dedicated daemon for it. **Use default** restores the original location. `PRIME_AGENT_SESSION_DIR` still overrides the sessions location when supplied at launch.
+- **Live CLI sessions:** In the default data folder, choose **Attach to CLI daemon** in Settings to join an existing terminal session. Start `prime-agent` in a terminal first. Desktop won't start, stop or replace the CLI daemon. If the CLI already holds a saved chat, join its daemon or close the CLI session before resuming it in Desktop.
+
+Global agent settings, model configuration and the continual harness stay in the CLI data folder. Project settings still follow the conversation’s project. Desktop-only preferences are saved separately in `desktop-ui.json`.
+
+Project list telemetry is off unless you explicitly set `telemetry.enabled` to `true` in the shared global settings. Desktop respects project opt-outs, `DO_NOT_TRACK` and offline mode; environment overrides cannot enable these events. It records only add/remove actions and standard telemetry metadata, never the project name, path, or chats.
+
+## Test without opening a window
+
+```bash
+nice -n 10 cargo build --locked --release -p pa-cli --bin prime-agent
+nice -n 10 cargo test --locked --release -p pa-desktop
+```
+
+The composer test uses GPUI's in-memory `TestWindow`. It selects a session, clicks the composer, types a prompt and presses Return. A real daemon in a temporary directory runs the scripted `faux` provider. The test checks the draft, prompt and reply without opening the app, sending OS input, or using provider credentials.
+
+The kernel-backed subagent test requires an already provisioned Prime Agent kernel interpreter. To exercise live spawn, completion, and parent/child navigation without opening a window:
+
+```bash
+PA_E2E_KERNEL_PYTHON="$HOME/.prime/agent/kernel-venv/bin/python" nice -n 10 cargo test --locked --release -p pa-desktop --test daemon_roundtrip a_spawned_subagent_updates -- --ignored
+```
+
+## CLI Flags
+
+- `--cwd <DIR>`: Start in a specific project directory.
+- `--daemon-socket <PATH>`: Attach to a daemon already listening at this Unix socket (no automatic launch).
+- `--shared-daemon`: Attach to the shared CLI daemon (`daemon.sock`) instead of the dedicated `desktop-daemon.sock`.
+- `--dark` / `--light`: Start in *Obsidian Clay* (dark) or *Editorial Parchment* (light).
+- `--tab <agents|harness|runtime|system>`: Open a specific Harness Studio tab on launch.
+- `--modal <models|switcher|settings>`: Open a specific modal on launch.
+
+## Keyboard Shortcuts
+
+| Shortcut | Action |
+| --- | --- |
+| `⌘N` | New chat in the current project |
+| `⇧⌘O` | Add a project folder |
+| `⌘K` | Quick Switcher & command palette |
+| `⌘M` | Searchable Model Picker (Prime Inference, OpenAI Codex, Google Gemini, Anthropic, OpenAI) |
+| `⇧⌘E` | Cycle thinking effort (`off` -> `minimal` -> `low` -> `medium` -> `high` -> `xhigh`) |
+| `⌘O` | Cycle transcript detail (`Overview` -> `Details` -> `All`) |
+| `⌘B` | Toggle the project sidebar |
+| `⌘I` | Toggle right Agentic Harness Studio drawer |
+| `⇧⌘H` | Open Continual Harness Studio (`Memory`, `Prompt`, `Skill`, `Subagent`) |
+| `⌘/` | Toggle `/btw` parallel side-question bar |
+| `⇧⌘K` | Compact session context |
+| `⇧⌘R` | Trigger Continual Harness refinement |
+| `⇧⌘L` | Toggle *Obsidian Clay* / *Editorial Parchment* theme |
+| `⌘,` | Provider credentials & daemon target settings |
+| `Esc` | Close modal, or stop active streaming turn |
+
+## Scope
+
+- Native Metal-accelerated desktop UI built on Zed's `gpui` (`0.2.2`).
+- Non-blocking async JSONL daemon bridge (`bridge/`) over `pa-types` wire frames on a 2-thread Tokio worker.
+- Dual daemon target support: dedicated `DesktopHarness` supervisor (`desktop-daemon.sock`) and `SharedCli` (`daemon.sock`).
+- Continual Harness Studio (`state/harness_store.rs`, `ui/inspector.rs`) backed by `pa-core::refinement` (`<agent_dir>/harness` and `<agent_dir>/session-artifacts/<id>/harness`).
+- Provider credential overview and locked `0o600` API-key storage via `pa-core::auth`.
+
+## Non-goals
+
+No duplicate agent loop or duplicate session store; session execution, RLM subagent recursion, Python REPL kernel lifecycle, and compaction run in the supervised `prime-agent` daemon.
+
+## Public API
+
+The `prime-agent-ui` binary entrypoint and `run_desktop_app` launch configuration.
+
+## Depends on
+
+`pa-types`, `pa-core`, `pa-daemon` (socket path resolution), `pa-telemetry` (project adoption event schema).

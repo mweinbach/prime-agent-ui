@@ -23,8 +23,8 @@ pub use github_copilot::{
     CopilotCredentials, LOGIN_CANCELLED as COPILOT_LOGIN_CANCELLED,
 };
 pub use openai_codex::{
-    login_openai_codex, refresh_openai_codex_token, CodexLoginUi, OAuthCredentials,
-    DEFAULT_ORIGINATOR, LOGIN_CANCELLED,
+    codex_user_agent, login_openai_codex, refresh_openai_codex_token, CodexLoginUi,
+    OAuthCredentials, CODEX_CLIENT_VERSION, DEFAULT_ORIGINATOR, LOGIN_CANCELLED,
 };
 pub use provider_http::{
     ProviderHttp, ProviderHttpMethod, ProviderHttpRequest, ProviderHttpResponse,

@@ -9,6 +9,8 @@ use std::sync::{Arc, Mutex, OnceLock};
 use crate::bundled::{load_bundled_models, BundledAssets};
 use crate::cache::{CatalogCache, RefreshOptions, PUBLIC_SCOPE};
 use crate::fetch::{CatalogFetcher, MODEL_CATALOG_URL};
+use crate::google::GoogleCatalog;
+use crate::openai_codex::CodexCatalog;
 use crate::pinning::{parse_provider_model_catalog, PinnedTemplates};
 use crate::prime_inference::{
     merge_prime_inference_models, PrimeInferenceCatalog, PrimeInferenceCredentials,
@@ -59,6 +61,8 @@ impl PrimeCredentials {
 pub struct ModelCatalog {
     provider_cache: CatalogCache<Vec<Model>>,
     prime_inference: PrimeInferenceCatalog,
+    codex: CodexCatalog,
+    google: GoogleCatalog,
     bundled: BundledAssets,
     templates: PinnedTemplates,
     compiled: Arc<Vec<Model>>,
@@ -125,6 +129,8 @@ impl ModelCatalog {
                 Arc::new(CatalogFetcher::new()),
                 parse,
             ),
+            codex: CodexCatalog::new(models_dir.clone()),
+            google: GoogleCatalog::new(models_dir.clone()),
             prime_inference: PrimeInferenceCatalog::with_base_url(models_dir, pi_base_url),
             bundled: bundled_dir
                 .map_or_else(BundledAssets::at_package_root, BundledAssets::from_dir),
@@ -134,6 +140,16 @@ impl ModelCatalog {
             hourly_loop: OnceLock::new(),
             pi_scope_seen: Mutex::new(None),
         }
+    }
+
+    /// The shared `ChatGPT`-authorized Codex catalog for this model directory.
+    pub fn codex(&self) -> &CodexCatalog {
+        &self.codex
+    }
+
+    /// The shared credentialed Gemini catalog for this model directory.
+    pub fn google(&self) -> &GoogleCatalog {
+        &self.google
     }
 
     pub fn prime_inference_base_url(&self) -> &str {

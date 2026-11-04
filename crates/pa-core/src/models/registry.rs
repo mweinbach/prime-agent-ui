@@ -95,7 +95,7 @@ pub struct ModelRegistry {
     authorized_team_id: Option<String>,
     /// The process-shared live catalog chain (`catalog_chain::catalog_for`);
     /// `resolve()` sources built-ins from it.
-    catalog: std::sync::Arc<pa_models::ModelCatalog>,
+    pub(super) catalog: std::sync::Arc<pa_models::ModelCatalog>,
 }
 
 /// Under a stored xAI subscription the provider's models switch onto the
@@ -547,8 +547,9 @@ impl ModelRegistry {
         custom: &CustomModelsResult,
         credentials: Option<&pa_models::PrimeCredentials>,
     ) -> Vec<Model> {
-        self.catalog
-            .resolve(credentials)
+        let mut built_in = self.catalog.resolve(credentials);
+        self.merge_authorized_provider_catalogs(&mut built_in);
+        built_in
             .into_iter()
             .map(|mut model| {
                 if let Some(provider_override) = custom.provider_overrides.get(&model.provider) {
@@ -616,6 +617,9 @@ impl ModelRegistry {
         self.catalog
             .refresh_with_credentials(force, credentials.as_ref())
             .await;
+        // Token refresh and account discovery run only in this awaited
+        // background refresh, never while serving the picker's snapshot.
+        self.refresh_authorized_provider_catalogs(force).await;
         self.load_models();
         self.refresh_private_prime_inference_authorization(
             previous_ids,

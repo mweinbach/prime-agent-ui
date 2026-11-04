@@ -38,8 +38,8 @@ pseudonymous installation identity for Prime Agent product analytics.
 - No settings reading: the enabled/disclosure flow is owned by pa-core
   settings + pa-cli wiring (this crate only answers "does the environment
   override?").
-- No event emission from this crate: seams live in pa-core/pa-daemon/pa-cli,
-  which call `track` with schema-documented events.
+- No emission sites in this crate. pa-core, pa-daemon, pa-cli and pa-desktop
+  call `track` with catalogued events.
 - No prompt/session content, tool arguments, file paths, or user identity —
   by construction (primitives-only properties).
 - No retries or delivery guarantees: batches are best-effort and offline-safe
@@ -65,4 +65,4 @@ pseudonymous installation identity for Prime Agent product analytics.
 ## Placement
 
 Depends on no workspace crate (sits beside pa-types at the bottom of the
-dependency graph). Consumers: pa-core, pa-daemon, pa-cli.
+dependency graph). Consumers: pa-core, pa-daemon, pa-cli, pa-desktop.
