@@ -300,19 +300,33 @@ fn render_quick_switcher_modal(
         .trim()
         .to_ascii_lowercase();
 
-    let actions: [(&str, &str, &str); 6] = [
-        ("act-new", "New chat in this project", "⌘N"),
-        ("act-model", "Switch model", "⌘M"),
-        ("act-folder", "Add project…", "⇧⌘O"),
-        ("act-harness", "Open harness inspector", "⇧⌘H"),
-        ("act-compact", "Compact conversation context", "⇧⌘K"),
-        ("act-theme", "Switch light or dark appearance", "⇧⌘L"),
+    let actions = [
+        ("act-new", "New chat in this project", "⌘N", "Ctrl+N"),
+        ("act-model", "Switch model", "⌘M", "Ctrl+M"),
+        ("act-folder", "Add project…", "⇧⌘O", "Ctrl+Shift+O"),
+        (
+            "act-harness",
+            "Open harness inspector",
+            "⇧⌘H",
+            "Ctrl+Shift+H",
+        ),
+        (
+            "act-compact",
+            "Compact conversation context",
+            "⇧⌘K",
+            "Ctrl+Shift+K",
+        ),
+        (
+            "act-theme",
+            "Switch light or dark appearance",
+            "⇧⌘L",
+            "Ctrl+Shift+L",
+        ),
     ];
 
-    let matching_actions: Vec<_> = actions
+    let matching_actions = actions
         .into_iter()
-        .filter(|(_, label, _)| q.is_empty() || label.to_ascii_lowercase().contains(&q))
-        .collect();
+        .filter(|(_, label, _, _)| q.is_empty() || label.to_ascii_lowercase().contains(&q));
 
     let groups = view.project_groups(&q);
     let project_rows = groups
@@ -361,7 +375,12 @@ fn render_quick_switcher_modal(
                 .flex()
                 .flex_col()
                 .gap(px(3.0))
-                .children(matching_actions.into_iter().map(|(id, label, shortcut)| {
+                .children(matching_actions.map(|(id, label, mac, other)| {
+                    let shortcut = if cfg!(target_os = "macos") {
+                        mac
+                    } else {
+                        other
+                    };
                     div()
                         .id(SharedString::from(id))
                         .px(px(12.0))

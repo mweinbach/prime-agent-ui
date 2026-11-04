@@ -36,19 +36,32 @@ impl CliData {
     }
 
     pub(super) fn desktop_socket(&self) -> PathBuf {
-        let dir = pa_daemon::socket::socket_dir();
-        // Keep the original default endpoint, so an upgrade can reattach to existing turns.
-        if pa_types::platform::home_dir()
-            .is_some_and(|home| self.agent == home.join(pa_types::platform::dirs::CONFIG_DIR_NAME))
-            && self.sessions == self.agent.join("sessions")
+        #[cfg(unix)]
         {
-            return dir.join(super::DESKTOP_DAEMON_SOCKET_NAME);
+            let dir = pa_daemon::socket::socket_dir();
+            // Keep the original default endpoint so upgrades can reattach to existing turns.
+            if pa_types::platform::home_dir().is_some_and(|home| {
+                self.agent == home.join(pa_types::platform::dirs::CONFIG_DIR_NAME)
+            }) && self.sessions == self.agent.join("sessions")
+            {
+                return dir.join(super::DESKTOP_DAEMON_SOCKET_NAME);
+            }
+            dir.join(format!("desktop-{}.sock", self.profile_key()))
         }
-        // One socket per store pair: changing profiles must never reuse the previous daemon's keys.
+        #[cfg(windows)]
+        {
+            // The pipe namespace is machine-wide. Key even the default profile, and
+            // never collide with the shared CLI's pipe.
+            PathBuf::from(format!(
+                r"\\.\pipe\prime-agent-desktop-{}",
+                self.profile_key()
+            ))
+        }
+    }
+
+    // One endpoint per store pair: changing profiles must never reuse the previous daemon's keys.
+    fn profile_key(&self) -> String {
         let key = format!("{}\0{}", self.agent.display(), self.sessions.display());
-        dir.join(format!(
-            "desktop-{}.sock",
-            pa_daemon::paths::hash_key(&key, 16)
-        ))
+        pa_daemon::paths::hash_key(&key, 16)
     }
 }

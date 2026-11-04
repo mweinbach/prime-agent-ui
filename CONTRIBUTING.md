@@ -1,6 +1,6 @@
 # Contributing
 
-Develop the GUI on a branch of `mweinbach/prime-agent-ui`. Run `make init`, then `make check`. For a shipped build, run `make desktop-app` on macOS. Tests must not activate a window on the user’s desktop or access their credentials or conversations.
+Develop the GUI on a branch of `mweinbach/prime-agent-ui`. Run `make init`, then `make check`. For a release archive, use [`scripts/build_desktop.py`](scripts/build_desktop.py) on a supported native host. Tests must not activate a window on the user’s desktop or access their credentials or conversations.
 
 ## Harness changes
 

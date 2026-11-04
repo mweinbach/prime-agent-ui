@@ -456,6 +456,11 @@ fn render_console_output(
                 .child((*line).to_string())
         }))
         .when(all_lines.len() > max_lines, |d| {
+            let shortcut = if cfg!(target_os = "macos") {
+                "⌘O"
+            } else {
+                "Ctrl+O"
+            };
             d.child(
                 div()
                     .pt(px(4.0))
@@ -463,7 +468,7 @@ fn render_console_output(
                     .text_size(px(11.0))
                     .text_color(palette.text_muted)
                     .child(format!(
-                        "… {} more lines (switch view to All with ⌘O)",
+                        "… {} more lines (switch view to All with {shortcut})",
                         all_lines.len() - max_lines
                     )),
             )

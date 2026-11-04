@@ -38,24 +38,26 @@ impl IsolatedDaemon {
     fn with_kernel(kernel: Option<&Path>) -> Self {
         let binary = pa_desktop::bridge::locate_prime_agent_binary()
             .expect("build the companion `prime-agent` before running daemon_roundtrip");
-        // Both the supervisor and worker Unix socket paths must fit macOS SUN_PATH.
-        // Use the same path spelling before and after the session's parents exist
-        // (`/tmp` is a symlink to `/private/tmp` on macOS).
-        let tmp = std::fs::canonicalize("/tmp").expect("system temp directory");
-        let root = tempfile::tempdir_in(tmp).expect("short tempdir");
+        // Keep Unix sockets short, using the same path spelling before and after
+        // the session's parents exist (/tmp is a symlink on macOS).
+        #[cfg(unix)]
+        let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap());
+        #[cfg(windows)]
+        let root = tempfile::tempdir();
+        let root = root.expect("isolated daemon tempdir");
         let socket = root.path().join("d.sock");
         let agent_dir = root.path().join("agent-state");
         let work_dir = root.path().join("project");
         std::fs::create_dir_all(&agent_dir).unwrap();
         std::fs::create_dir_all(&work_dir).unwrap();
-        let child = Command::new(binary)
+        let mut command = Command::new(binary);
+        command
             .args(["--mode", "daemon", "--daemon-socket"])
             .arg(&socket)
             .current_dir(&work_dir)
             .env_clear()
             .env("HOME", root.path())
             .env("TMPDIR", root.path())
-            .env("PATH", "/usr/bin:/bin")
             .env("PRIME_AGENT_CODING_AGENT_DIR", &agent_dir)
             // No REPL calls in these turns; do not bootstrap a Python environment.
             .env(
@@ -71,9 +73,21 @@ impl IsolatedDaemon {
             .env("PI_OFFLINE", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("spawn isolated prime-agent daemon");
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        command.env("PATH", "/usr/bin:/bin");
+        #[cfg(windows)]
+        {
+            command.env("TMP", root.path()).env("TEMP", root.path());
+            // Only inherit OS and shell discovery paths, never provider credentials.
+            command.envs(
+                ["SystemRoot", "ProgramFiles", "ProgramFiles(x86)", "PATH"]
+                    .into_iter()
+                    .filter_map(|name| std::env::var_os(name).map(|value| (name, value))),
+            );
+            pa_core::platform::process::set_no_window(&mut command);
+        }
+        let child = command.spawn().expect("spawn isolated prime-agent daemon");
         let daemon = Self {
             child,
             root,
@@ -81,9 +95,16 @@ impl IsolatedDaemon {
             agent_dir,
             work_dir,
         };
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         let wait_sock = Instant::now() + Duration::from_secs(10);
-        while !daemon.socket.exists() {
-            assert!(Instant::now() < wait_sock, "daemon socket did not appear");
+        while !rt.block_on(pa_daemon::socket::can_connect(
+            &daemon.socket,
+            Duration::from_millis(250),
+        )) {
+            assert!(Instant::now() < wait_sock, "daemon did not start listening");
             std::thread::sleep(Duration::from_millis(20));
         }
         daemon
@@ -142,9 +163,16 @@ fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
 
 impl Drop for IsolatedDaemon {
     fn drop(&mut self) {
+        let pid = i32::try_from(self.child.id());
         // SIGTERM lets the supervisor reap its workers before TempDir removes their journals.
-        use pa_core::platform::process::{Signal, kill_pid};
-        if !i32::try_from(self.child.id()).is_ok_and(|pid| kill_pid(pid, Signal::Term)) {
+        #[cfg(unix)]
+        let stopped = pid.is_ok_and(|pid| {
+            use pa_core::platform::process::{Signal, kill_pid};
+            kill_pid(pid, Signal::Term)
+        });
+        #[cfg(windows)]
+        let stopped = pid.is_ok_and(pa_core::platform::process::kill_process_group_or_pid);
+        if !stopped {
             let _ = self.child.kill();
         }
         let _ = self.child.wait();
@@ -503,7 +531,9 @@ fn an_older_cli_chat_opens_from_another_project_without_copying_it() {
     older.set_path(path.clone());
     older.rewrite().unwrap();
     let history = std::fs::read(&path).unwrap();
-    std::fs::File::open(&path)
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
         .unwrap()
         .set_modified(std::time::UNIX_EPOCH)
         .unwrap();

@@ -61,22 +61,22 @@ actions!(
 /// Register global application shortcuts and native macOS menus.
 pub fn register_workspace_bindings_and_menus(cx: &mut App) {
     cx.bind_keys([
-        KeyBinding::new("cmd-n", NewSession, None),
-        KeyBinding::new("cmd-shift-o", OpenProjectFolder, None),
-        KeyBinding::new("cmd-k", QuickSwitcher, None),
-        KeyBinding::new("cmd-m", OpenModelPicker, None),
-        KeyBinding::new("cmd-shift-e", CycleThinkingEffort, None),
-        KeyBinding::new("cmd-o", CycleDetailView, None),
-        KeyBinding::new("cmd-b", ToggleSidebar, None),
-        KeyBinding::new("cmd-i", ToggleInspector, None),
-        KeyBinding::new("cmd-shift-h", OpenHarnessStudio, None),
-        KeyBinding::new("cmd-/", ToggleSideQuestion, None),
-        KeyBinding::new("cmd-shift-k", TriggerCompact, None),
-        KeyBinding::new("cmd-shift-r", TriggerRefine, None),
-        KeyBinding::new("cmd-shift-l", ToggleTheme, None),
-        KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("secondary-n", NewSession, None),
+        KeyBinding::new("secondary-shift-o", OpenProjectFolder, None),
+        KeyBinding::new("secondary-k", QuickSwitcher, None),
+        KeyBinding::new("secondary-m", OpenModelPicker, None),
+        KeyBinding::new("secondary-shift-e", CycleThinkingEffort, None),
+        KeyBinding::new("secondary-o", CycleDetailView, None),
+        KeyBinding::new("secondary-b", ToggleSidebar, None),
+        KeyBinding::new("secondary-i", ToggleInspector, None),
+        KeyBinding::new("secondary-shift-h", OpenHarnessStudio, None),
+        KeyBinding::new("secondary-/", ToggleSideQuestion, None),
+        KeyBinding::new("secondary-shift-k", TriggerCompact, None),
+        KeyBinding::new("secondary-shift-r", TriggerRefine, None),
+        KeyBinding::new("secondary-shift-l", ToggleTheme, None),
+        KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("escape", DismissOverlay, None),
-        KeyBinding::new("cmd-q", QuitApp, None),
+        KeyBinding::new("secondary-q", QuitApp, None),
     ]);
 
     cx.on_action(|_: &QuitApp, cx| cx.quit());

@@ -41,31 +41,48 @@ actions!(
 /// Register global key bindings for [`TextInput`] contexts once at app startup.
 pub fn bind_text_input_keys(cx: &mut App) {
     let ctx = Some("PaTextInput");
+    let macos = cfg!(target_os = "macos");
     cx.bind_keys([
         KeyBinding::new("backspace", Backspace, ctx),
         KeyBinding::new("delete", Delete, ctx),
-        KeyBinding::new("alt-backspace", DeleteWordBack, ctx),
+        KeyBinding::new(
+            if macos {
+                "alt-backspace"
+            } else {
+                "ctrl-backspace"
+            },
+            DeleteWordBack,
+            ctx,
+        ),
         KeyBinding::new("left", Left, ctx),
         KeyBinding::new("right", Right, ctx),
         KeyBinding::new("up", Up, ctx),
         KeyBinding::new("down", Down, ctx),
-        KeyBinding::new("alt-left", WordLeft, ctx),
-        KeyBinding::new("alt-right", WordRight, ctx),
+        KeyBinding::new(if macos { "alt-left" } else { "ctrl-left" }, WordLeft, ctx),
+        KeyBinding::new(
+            if macos { "alt-right" } else { "ctrl-right" },
+            WordRight,
+            ctx,
+        ),
         KeyBinding::new("shift-left", SelectLeft, ctx),
         KeyBinding::new("shift-right", SelectRight, ctx),
-        KeyBinding::new("cmd-a", SelectAll, ctx),
-        KeyBinding::new("cmd-left", Home, ctx),
-        KeyBinding::new("cmd-right", End, ctx),
+        KeyBinding::new("secondary-a", SelectAll, ctx),
         KeyBinding::new("home", Home, ctx),
         KeyBinding::new("end", End, ctx),
         KeyBinding::new("enter", EnterKey, ctx),
         KeyBinding::new("shift-enter", ShiftEnterKey, ctx),
-        KeyBinding::new("cmd-enter", EnterKey, ctx),
-        KeyBinding::new("cmd-v", Paste, ctx),
-        KeyBinding::new("cmd-c", Copy, ctx),
-        KeyBinding::new("cmd-x", Cut, ctx),
-        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
+        KeyBinding::new("secondary-enter", EnterKey, ctx),
+        KeyBinding::new("secondary-v", Paste, ctx),
+        KeyBinding::new("secondary-c", Copy, ctx),
+        KeyBinding::new("secondary-x", Cut, ctx),
     ]);
+    if macos {
+        cx.bind_keys([
+            KeyBinding::new("cmd-left", Home, ctx),
+            KeyBinding::new("cmd-right", End, ctx),
+            KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, ctx),
+        ]);
+    }
 }
 
 /// Visual/behavioral mode of a [`TextInput`].

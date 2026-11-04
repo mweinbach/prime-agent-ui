@@ -50,8 +50,9 @@ pub fn run_desktop_app(options: LaunchOptions) {
                     window_min_size: Some(size(px(660.0), px(540.0))),
                     titlebar: Some(TitlebarOptions {
                         title: Some("Prime Agent".into()),
-                        appears_transparent: true,
-                        traffic_light_position: Some(point(px(16.0), px(15.0))),
+                        appears_transparent: cfg!(target_os = "macos"),
+                        traffic_light_position: cfg!(target_os = "macos")
+                            .then(|| point(px(16.0), px(15.0))),
                     }),
                     window_background: WindowBackgroundAppearance::Opaque,
                     focus: true,

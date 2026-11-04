@@ -12,14 +12,17 @@ Follows strict macOS bundle sealing order:
 from __future__ import annotations
 
 import argparse
+import io
 import math
 import plistlib
 import shutil
+import stat
 import struct
 import subprocess
 import tempfile
+import zipfile
 import zlib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 def _png_chunk(tag: bytes, data: bytes) -> bytes:
@@ -160,69 +163,82 @@ def parse_workspace_version(repo_root: Path) -> str:
     raise SystemExit(f"Missing workspace version in {repo_root / 'Cargo.toml'}")
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Package Prime Agent.app")
-    parser.add_argument("--profile", choices=["debug", "release"], default="release")
-    parser.add_argument("--out-dir", default="dist")
-    args = parser.parse_args()
+DESKTOP_NOTICES = ("LICENSE", "crates/pa-desktop/ICON-LICENSE")
+HARNESS_NOTICES = {
+    "LICENSE": "LICENSE",
+    "vendor/crossterm/LICENSE": "crossterm/LICENSE",
+    "crates/pa-core/assets/export-html/NOTICE.md": "export-html/NOTICE.md",
+    "crates/pa-core/assets/export-html/vendor/marked.LICENSE.md": (
+        "export-html/vendor/marked.LICENSE.md"
+    ),
+    "crates/pa-core/assets/export-html/vendor/highlight.LICENSE": (
+        "export-html/vendor/highlight.LICENSE"
+    ),
+}
 
-    repo_root = Path(__file__).resolve().parent.parent
-    harness = repo_root / "harness"
-    target_dir = repo_root / "target" / args.profile
-    ui_bin = target_dir / "prime-agent-ui"
-    cli_bin = target_dir / "prime-agent"
 
-    if not ui_bin.is_file() or not cli_bin.is_file():
-        raise SystemExit(
-            f"Missing built binaries in {target_dir}; run `make desktop-app` from the checkout."
-        )
+def stage_resources(repo_root: Path, resources: Path, harness_ref: str = "HEAD") -> None:
+    resources.mkdir(parents=True, exist_ok=True)
+    # Copy committed package files only, never an edited skill or a local Python cache.
+    archive = subprocess.check_output(
+        [
+            "git", "-C", str(repo_root / "harness"), "archive", "--format=zip",
+            harness_ref, "--", "skills", "prime-agent-runtime/pyproject.toml",
+            "prime-agent-runtime/src", *HARNESS_NOTICES,
+        ]
+    )
+    with zipfile.ZipFile(io.BytesIO(archive)) as source:
+        for entry in source.infolist():
+            if entry.is_dir():
+                continue
+            relative = PurePosixPath(entry.filename)
+            if (
+                relative.is_absolute() or ".." in relative.parts
+                or "\\" in entry.filename or ":" in entry.filename
+                or stat.S_ISLNK(entry.external_attr >> 16)
+            ):
+                raise ValueError(f"Invalid packaged resource: {entry.filename}")
+            if entry.filename in HARNESS_NOTICES:
+                destination = resources / "licenses" / "harness" / HARNESS_NOTICES[entry.filename]
+            else:
+                destination = resources.joinpath(*relative.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(source.read(entry))
 
-    out_root = repo_root / args.out_dir
+    desktop_licenses = resources / "licenses" / "desktop"
+    desktop_licenses.mkdir(parents=True, exist_ok=True)
+    for name in DESKTOP_NOTICES:
+        data = subprocess.check_output(["git", "-C", str(repo_root), "show", f"HEAD:{name}"])
+        (desktop_licenses / Path(name).name).write_bytes(data)
+
+
+def stage_binaries(binaries: tuple[Path, Path], destination: Path) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for binary in binaries:
+        copy = destination / binary.name
+        shutil.copyfile(binary, copy)
+        copy.chmod(0o755)
+
+
+def verify_app(app_dir: Path) -> None:
+    subprocess.run(
+        ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app_dir)],
+        check=True,
+    )
+
+
+def package_app(
+    repo_root: Path, out_root: Path, binaries: tuple[Path, Path], harness_ref: str = "HEAD"
+) -> Path:
     app_dir = out_root / "Prime Agent.app"
     if app_dir.exists():
         shutil.rmtree(app_dir)
 
     contents = app_dir / "Contents"
-    macos_dir = contents / "MacOS"
     resources_dir = contents / "Resources"
-    macos_dir.mkdir(parents=True)
-    resources_dir.mkdir(parents=True)
-
-    # 1. Copy executables
-    shutil.copy2(ui_bin, macos_dir / "prime-agent-ui")
-    shutil.copy2(cli_bin, macos_dir / "prime-agent")
-    (macos_dir / "prime-agent-ui").chmod(0o755)
-    (macos_dir / "prime-agent").chmod(0o755)
-
-    # 2. Assemble ALL resources under Contents/Resources BEFORE signing
+    stage_binaries(binaries, contents / "MacOS")
+    stage_resources(repo_root, resources_dir, harness_ref)
     build_icns(resources_dir / "AppIcon.icns")
-
-    # Archive the submodule's committed resources instead of copying its working tree.
-    # Even files under skills/ can include local credentials or generated Python caches.
-    archive = subprocess.run(
-        [
-            "git", "-C", str(harness), "archive", "HEAD", "--",
-            "skills", "prime-agent-runtime/pyproject.toml", "prime-agent-runtime/src",
-        ],
-        stdout=subprocess.PIPE,
-        check=True,
-    )
-    subprocess.run(["tar", "-xf", "-", "-C", str(resources_dir)], input=archive.stdout, check=True)
-
-    licenses = resources_dir / "licenses"
-    export_assets = harness / "crates/pa-core/assets/export-html"
-    for source, relative in [
-        (repo_root / "LICENSE", "desktop/LICENSE"),
-        (repo_root / "crates/pa-desktop/ICON-LICENSE", "desktop/ICON-LICENSE"),
-        (harness / "LICENSE", "harness/LICENSE"),
-        (harness / "vendor/crossterm/LICENSE", "harness/crossterm/LICENSE"),
-        (export_assets / "NOTICE.md", "harness/export-html/NOTICE.md"),
-        (export_assets / "vendor/marked.LICENSE.md", "harness/export-html/vendor/marked.LICENSE.md"),
-        (export_assets / "vendor/highlight.LICENSE", "harness/export-html/vendor/highlight.LICENSE"),
-    ]:
-        destination = licenses / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, destination)
 
     version = parse_workspace_version(repo_root)
     info = {
@@ -248,10 +264,24 @@ def main() -> None:
         ["codesign", "--force", "--deep", "--sign", "-", str(app_dir)],
         check=True,
     )
-    subprocess.run(
-        ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app_dir)],
-        check=True,
-    )
+    verify_app(app_dir)
+    return app_dir
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Package Prime Agent.app")
+    parser.add_argument("--profile", choices=["debug", "release"], default="release")
+    parser.add_argument("--out-dir", default="dist")
+    args = parser.parse_args()
+
+    repo_root = Path(__file__).resolve().parent.parent
+    target_dir = repo_root / "target" / args.profile
+    binaries = (target_dir / "prime-agent-ui", target_dir / "prime-agent")
+    if not all(binary.is_file() for binary in binaries):
+        raise SystemExit(
+            f"Missing built binaries in {target_dir}; run `make desktop-app` from the checkout."
+        )
+    app_dir = package_app(repo_root, repo_root / args.out_dir, binaries)
     print(f"Packaged and verified: {app_dir}")
 
 

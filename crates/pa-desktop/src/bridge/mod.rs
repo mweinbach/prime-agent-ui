@@ -1,7 +1,7 @@
 //! Non-blocking async daemon bridge (`pa-desktop` <-> `pa-daemon`).
 //!
 //! Runs all socket and process work on a dedicated 2-thread Tokio runtime so
-//! the GPUI Metal render thread never blocks on network, IPC, or process spawns.
+//! the GPUI render thread never blocks on network, IPC, or process spawns.
 
 mod catalog;
 mod data;
@@ -35,7 +35,8 @@ use crate::state::{
 };
 use crate::theme::DaemonTarget;
 
-/// Default dedicated socket filename for the Desktop Harness supervisor inside `socket_dir()`.
+/// Default dedicated Unix socket filename for the Desktop Harness supervisor.
+#[cfg(unix)]
 pub const DESKTOP_DAEMON_SOCKET_NAME: &str = "desktop-daemon.sock";
 
 /// Commands dispatched from the GPUI foreground view to the background I/O worker.
@@ -367,25 +368,38 @@ pub(crate) fn socket_path_for_target(
     }
 }
 
-/// Locate the companion `prime-agent` executable built from this repository or app bundle.
+/// Locate the companion `prime-agent` executable built from this repository or shipped with the app.
 #[must_use]
 pub fn locate_prime_agent_binary() -> Option<PathBuf> {
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        let sibling = dir.join("prime-agent");
-        if sibling.is_file() {
-            return Some(sibling);
-        }
+    companion_binary_in(std::env::current_exe().ok()?.parent()?)
+}
+
+fn companion_binary_in(dir: &Path) -> Option<PathBuf> {
+    let name = format!("prime-agent{}", std::env::consts::EXE_SUFFIX);
+    let sibling = dir.join(&name);
+    if sibling.is_file() {
+        return Some(sibling);
     }
     // Integration-test executables live one directory below their companion binary.
-    let exe = std::env::current_exe().ok()?;
-    let deps = exe.parent()?;
-    if deps.file_name()? != "deps" {
+    if dir.file_name()? != "deps" {
         return None;
     }
-    let candidate = deps.parent()?.join("prime-agent");
+    let candidate = dir.parent()?.join(name);
     candidate.is_file().then_some(candidate)
+}
+
+fn companion_resources(binary: &Path) -> Option<PathBuf> {
+    let dir = binary.parent()?;
+    // On macOS resources live outside MacOS/ so bundle signing stays strict-clean.
+    let resources = if cfg!(target_os = "macos") {
+        dir.parent()?.join("Resources")
+    } else {
+        dir.join("resources")
+    };
+    resources
+        .join("prime-agent-runtime")
+        .is_dir()
+        .then_some(resources)
 }
 
 #[derive(PartialEq, Eq)]
@@ -422,12 +436,15 @@ async fn ensure_supervisor_listening(
         )
     })?;
 
+    #[cfg(unix)]
     if let Some(parent) = socket_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
 
     let mut cmd = Command::new(&binary);
     data.configure(&mut cmd);
+    #[cfg(windows)]
+    pa_core::platform::process::set_new_process_group(&mut cmd);
     cmd.arg("--mode")
         .arg("daemon")
         .arg("--daemon-socket")
@@ -436,17 +453,10 @@ async fn ensure_supervisor_listening(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
 
-    // Inside `Prime Agent.app/Contents/MacOS/prime-agent`, bundled `skills/` and
-    // `prime-agent-runtime/` live in `../Resources/` so bundle signing stays strict-clean.
-    if let Some(macos_dir) = binary.parent()
-        && let Some(contents_dir) = macos_dir.parent()
+    if std::env::var_os("PI_PACKAGE_DIR").is_none()
+        && let Some(resources) = companion_resources(&binary)
     {
-        let resources_dir = contents_dir.join("Resources");
-        if resources_dir.join("prime-agent-runtime").is_dir()
-            && std::env::var_os("PI_PACKAGE_DIR").is_none()
-        {
-            cmd.env("PI_PACKAGE_DIR", &resources_dir);
-        }
+        cmd.env("PI_PACKAGE_DIR", resources);
     }
 
     cmd.spawn()
@@ -532,16 +542,7 @@ impl RawClient {
         let (hello_tx, hello_rx) = oneshot::channel::<Value>();
         let pending = Arc::new(PendingMap::new());
         let reader_pending = Arc::clone(&pending);
-
-        tokio::spawn(async move {
-            while let Some(mut line) = line_rx.recv().await {
-                line.push('\n');
-                if write_half.write_all(line.as_bytes()).await.is_err() {
-                    break;
-                }
-            }
-            let _ = write_half.shutdown().await;
-        });
+        let pending_on_disconnect = Arc::clone(&pending);
 
         let reader_handle = tokio::spawn(async move {
             let mut reader = BufReader::new(read_half);
@@ -576,12 +577,22 @@ impl RawClient {
             reader_pending.fail_all("daemon connection closed");
         });
 
+        tokio::spawn(async move {
+            while let Some(mut line) = line_rx.recv().await {
+                line.push('\n');
+                if write_half.write_all(line.as_bytes()).await.is_err() {
+                    break;
+                }
+            }
+            let _ = write_half.shutdown().await;
+            // A Windows pipe closes only after both halves are dropped.
+            reader_handle.abort();
+            pending_on_disconnect.fail_all("daemon connection closed");
+        });
+
         let hello = tokio::time::timeout(Duration::from_secs(10), hello_rx)
             .await
-            .map_err(|_| {
-                reader_handle.abort();
-                anyhow!("daemon hello timeout")
-            })?
+            .map_err(|_| anyhow!("daemon hello timeout"))?
             .map_err(|_| anyhow!("daemon closed before hello"))?;
 
         anyhow::ensure!(
@@ -1975,24 +1986,55 @@ async fn hydrate_session_state(
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+    use pa_types::platform::transport::bind_transport;
+
+    fn short_tempdir() -> tempfile::TempDir {
+        #[cfg(unix)]
+        let root = tempfile::tempdir_in("/tmp");
+        #[cfg(windows)]
+        let root = tempfile::tempdir();
+        root.unwrap()
+    }
+
+    #[test]
+    fn packaged_companion_and_resources_are_resolved_relative_to_the_app() {
+        let root = tempfile::tempdir().unwrap();
+        let (bin_dir, resources) = if cfg!(target_os = "macos") {
+            let contents = root.path().join("Prime Agent.app/Contents");
+            (contents.join("MacOS"), contents.join("Resources"))
+        } else {
+            (root.path().to_owned(), root.path().join("resources"))
+        };
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let binary = bin_dir.join(if cfg!(windows) {
+            "prime-agent.exe"
+        } else {
+            "prime-agent"
+        });
+        std::fs::write(&binary, "").unwrap();
+        assert_eq!(companion_binary_in(&bin_dir), Some(binary.clone()));
+        assert_eq!(companion_resources(&binary), None);
+        std::fs::create_dir_all(resources.join("prime-agent-runtime")).unwrap();
+        assert_eq!(companion_resources(&binary), Some(resources));
+    }
 
     #[tokio::test]
     async fn an_incompatible_supervisor_is_never_sent_a_shutdown() {
         use tokio::io::AsyncReadExt as _;
-        let tmp = tempfile::tempdir_in("/tmp").unwrap();
+        let tmp = short_tempdir();
         let path = tmp.path().join("daemon.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let listener = bind_transport(&path).await.unwrap();
         let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            socket
+            let (mut read, mut write) = listener.accept().await.unwrap().split();
+            write
                 .write_all(b"{\"type\":\"daemon_hello\",\"schemaId\":\"other\"}\n")
                 .await
                 .unwrap();
             let mut received = Vec::new();
-            socket.read_to_end(&mut received).await.unwrap();
+            read.read_to_end(&mut received).await.unwrap();
             received
         });
         let result = ensure_supervisor_listening(
@@ -2002,7 +2044,11 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
-        assert!(server.await.unwrap().is_empty());
+        let received = tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .expect("desktop did not disconnect from the incompatible supervisor")
+            .unwrap();
+        assert!(received.is_empty());
     }
 
     /// Critical-path guard (AGENTS.md): dispatching a request from the UI
@@ -2010,10 +2056,13 @@ mod tests {
     /// and never sends a handshake or reply.
     #[test]
     fn bridge_send_never_blocks_ui_when_socket_hangs() {
-        let tmp = tempfile::tempdir().unwrap();
+        let tmp = short_tempdir();
         let sock = tmp.path().join("hanging.sock");
-        // Bind a UnixListener that accepts nothing / never greets with daemon_hello.
-        let _hanging_listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _hanging_listener = rt.block_on(bind_transport(&sock)).unwrap();
 
         let (bridge, _rx) = BridgeHandle::spawn(CliData::new(tmp.path().to_owned())).unwrap();
         let start = Instant::now();

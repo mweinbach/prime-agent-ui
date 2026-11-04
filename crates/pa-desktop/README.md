@@ -2,6 +2,8 @@
 
 `prime-agent-ui` is the native GPUI desktop app for Prime Agent. It talks to the `prime-agent` daemon built from the pinned [`harness/`](../../harness) submodule.
 
+For Windows and Linux builds, see [Download or build](../../README.md#download-or-build). On those platforms the app uses Ctrl in place of the Command key shown in the macOS shortcuts below.
+
 ## Build and run on macOS
 
 Run these commands from the repository root:
