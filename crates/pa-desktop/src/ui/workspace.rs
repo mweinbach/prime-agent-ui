@@ -2,6 +2,7 @@
 //! layout, keyboard shortcuts, native macOS sheets, and live daemon event stream.
 
 mod cli_data;
+mod interactions;
 mod projects;
 use crate::state::{DraftKey, subagents::Subagents};
 
@@ -13,7 +14,7 @@ use base64::Engine as _;
 use futures::StreamExt as _;
 use gpui::{
     App, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding, Menu,
-    MenuItem, PathPromptOptions, Render, ScrollHandle, SystemMenuType, Window, actions, div, point,
+    MenuItem, PathPromptOptions, Render, ScrollHandle, SystemMenuType, Window, actions, div,
     prelude::*, px,
 };
 use pa_core::refinement::{HarnessScope, RefinementKind};
@@ -23,7 +24,7 @@ use crate::state::harness_store::{
     HarnessEntryDraft, HarnessSnapshot, ProviderAuthItem, delete_harness_entry,
     load_provider_auth_items, set_provider_api_key, upsert_harness_entry,
 };
-use crate::state::models::{CatalogModel, THINKING_LEVELS, parse_model_catalog};
+use crate::state::models::{CatalogModel, parse_model_catalog};
 use crate::state::transcript::AttachedSessionState;
 use crate::state::{
     ActiveModal, ActiveSessionRow, McpRow, SavedSessionRow, ScheduleRow, SessionTelemetry,
@@ -32,9 +33,10 @@ use crate::state::{
 use crate::theme::{DaemonTarget, DesktopPreferences, InspectorTab, Palette, ThemeMode, font_sans};
 use crate::ui::inspector::render_inspector;
 use crate::ui::modals::render_active_modal;
+use crate::ui::selectable_text::{ActiveSelection, CopySelection};
 use crate::ui::sidebar::render_sidebar;
 use crate::ui::stage::render_stage;
-use crate::ui::text_input::{InputKind, TextChanged, TextInput, TextSubmitted};
+use crate::ui::text_input::{InputKind, TextInput};
 
 actions!(
     pa_desktop_actions,
@@ -55,12 +57,14 @@ actions!(
         OpenSettings,
         DismissOverlay,
         QuitApp,
+        CompleteSlash,
     ]
 );
 
 /// Register global application shortcuts and native macOS menus.
 pub fn register_workspace_bindings_and_menus(cx: &mut App) {
     cx.bind_keys([
+        KeyBinding::new("secondary-c", CopySelection, Some("TranscriptSelection")),
         KeyBinding::new("secondary-n", NewSession, None),
         KeyBinding::new("secondary-shift-o", OpenProjectFolder, None),
         KeyBinding::new("secondary-k", QuickSwitcher, None),
@@ -76,6 +80,7 @@ pub fn register_workspace_bindings_and_menus(cx: &mut App) {
         KeyBinding::new("secondary-shift-l", ToggleTheme, None),
         KeyBinding::new("secondary-,", OpenSettings, None),
         KeyBinding::new("escape", DismissOverlay, None),
+        KeyBinding::new("tab", CompleteSlash, Some("PaCompletions > PaTextInput")),
         KeyBinding::new("secondary-q", QuitApp, None),
     ]);
 
@@ -209,10 +214,15 @@ pub struct PrimeDesktopView {
     pub selected_auth_provider: String,
 
     pub active_modal: Option<ActiveModal>,
+    pub(super) modal_selected_idx: usize,
+    pub(super) slash_selected_idx: usize,
+    pub(super) modal_scroll: ScrollHandle,
     pub renaming_session: bool,
     pub agent_mail_target: Option<String>,
     pub staged_images: Vec<StagedImage>,
 
+    pub(super) active_selection: ActiveSelection,
+    pub(super) follow_tail: bool,
     pub transcript_scroll: ScrollHandle,
     pub composer_input: Entity<TextInput>,
     pub sidebar_search_input: Entity<TextInput>,
@@ -243,6 +253,7 @@ impl PrimeDesktopView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        crate::assets::register_embedded_fonts(cx);
         let mut prefs = DesktopPreferences::load(&preferences_dir);
         let agent_dir = prefs
             .cli_data_dir
@@ -315,6 +326,18 @@ impl PrimeDesktopView {
         let mcp_token_input = TextInput::new(cx, InputKind::Secret, "Bearer token");
         let api_key_input = TextInput::new(cx, InputKind::Secret, "Paste a new API key…");
 
+        for input in [
+            &quick_bash_input,
+            &harness_body_input,
+            &schedule_interval_input,
+            &mcp_server_input,
+            &mcp_token_input,
+            &api_key_input,
+        ] {
+            input.update(cx, |input, _| {
+                input.set_font_family(crate::theme::font_mono());
+            });
+        }
         sidebar_search_input.update(cx, |inp, _| inp.set_font_size(12.5));
         refine_input.update(cx, |inp, _| inp.set_font_size(12.0));
         quick_bash_input.update(cx, |inp, _| inp.set_font_size(12.0));
@@ -322,41 +345,6 @@ impl PrimeDesktopView {
         schedule_prompt_input.update(cx, |inp, _| inp.set_font_size(11.5));
         mcp_server_input.update(cx, |inp, _| inp.set_font_size(11.5));
         mcp_token_input.update(cx, |inp, _| inp.set_font_size(11.5));
-
-        cx.subscribe_in(
-            &composer_input,
-            window,
-            |view, _, _: &TextSubmitted, window, cx| {
-                view.submit_composer(window, cx);
-            },
-        )
-        .detach();
-        cx.subscribe_in(
-            &rename_input,
-            window,
-            |view, input, _: &TextSubmitted, window, cx| {
-                let name = input.read(cx).text().to_owned();
-                view.commit_rename_session(&name, window, cx);
-            },
-        )
-        .detach();
-        cx.subscribe_in(
-            &side_question_input,
-            window,
-            |view, _, _: &TextSubmitted, window, cx| {
-                view.submit_side_question(window, cx);
-            },
-        )
-        .detach();
-        for input in [
-            &composer_input,
-            &sidebar_search_input,
-            &modal_search_input,
-            &api_key_input,
-        ] {
-            cx.subscribe(input, |_, _, _: &TextChanged, cx| cx.notify())
-                .detach();
-        }
 
         // Event-driven foreground stream: wakes ONLY when a daemon frame arrives (0% idle CPU/GPU).
         cx.spawn(async move |this, cx| {
@@ -416,9 +404,14 @@ impl PrimeDesktopView {
             provider_auth: Vec::new(),
             selected_auth_provider: "prime-inference".to_string(),
             active_modal: options.initial_modal,
+            modal_selected_idx: 0,
+            slash_selected_idx: 0,
+            modal_scroll: ScrollHandle::new(),
             renaming_session: false,
             agent_mail_target: None,
             staged_images: Vec::new(),
+            active_selection: ActiveSelection::default(),
+            follow_tail: true,
             transcript_scroll: ScrollHandle::new(),
             composer_input,
             sidebar_search_input,
@@ -436,16 +429,10 @@ impl PrimeDesktopView {
             mcp_token_input,
             api_key_input,
         };
+        instance.bind_input_interactions(window, cx);
         instance.sync_input_palettes(cx);
         instance.reload_local_stores(cx);
-        let focused = match instance.active_modal {
-            Some(ActiveModal::ModelPicker | ActiveModal::QuickSwitcher) => {
-                &instance.modal_search_input
-            }
-            Some(ActiveModal::SettingsAuth) => &instance.api_key_input,
-            None => &instance.composer_input,
-        };
-        window.focus(&focused.focus_handle(cx));
+        instance.focus_active_surface(window, cx);
         instance
     }
 
@@ -469,8 +456,15 @@ impl PrimeDesktopView {
             &self.api_key_input,
         ];
         for entity in inputs {
-            entity.update(cx, |inp, _| {
-                inp.set_colors(p.text_primary, p.text_muted, p.accent, p.accent_soft);
+            entity.update(cx, |inp, cx| {
+                inp.set_colors(
+                    p.text_primary,
+                    p.text_muted,
+                    p.accent,
+                    p.selection_bg,
+                    p.selection_bg_inactive,
+                );
+                cx.notify();
             });
         }
     }
@@ -619,7 +613,7 @@ impl PrimeDesktopView {
                     self.reload_local_stores(cx);
                     self.restore_draft(cx);
                 }
-                self.scroll_transcript_to_bottom();
+                self.follow_tail = true;
             }
             BridgeEvent::SnapshotChunkBegin {
                 active_session_id,
@@ -660,7 +654,7 @@ impl PrimeDesktopView {
                         .send(BridgeRequest::RefreshInspector { active_session_id });
                     self.restore_draft(cx);
                     self.reload_local_stores(cx);
-                    self.scroll_transcript_to_bottom();
+                    self.follow_tail = true;
                 }
             }
             BridgeEvent::SessionEvent {
@@ -676,16 +670,12 @@ impl PrimeDesktopView {
                             self.telemetry.update_from_state(st);
                         }
                     } else {
-                        let was_near_bottom = self.is_transcript_near_bottom();
                         let etype = event
                             .get("type")
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or_default()
                             .to_string();
                         self.session.apply_live_event(&event);
-                        if was_near_bottom {
-                            self.scroll_transcript_to_bottom();
-                        }
                         if matches!(etype.as_str(), "turn_end" | "agent_end" | "compaction_end") {
                             self.reload_local_stores(cx);
                             self.bridge
@@ -802,19 +792,6 @@ impl PrimeDesktopView {
         cx.notify();
     }
 
-    fn is_transcript_near_bottom(&self) -> bool {
-        let max_y = f32::from(self.transcript_scroll.max_offset().height);
-        let cur_y = -f32::from(self.transcript_scroll.offset().y);
-        max_y <= 4.0 || (max_y - cur_y) < 120.0
-    }
-
-    pub fn scroll_transcript_to_bottom(&self) {
-        let max_h = self.transcript_scroll.max_offset().height;
-        if max_h > px(0.0) {
-            self.transcript_scroll.set_offset(point(px(0.0), -max_h));
-        }
-    }
-
     pub fn reload_local_stores(&mut self, cx: &mut Context<Self>) {
         self.store_request += 1;
         let request = self.store_request;
@@ -841,6 +818,8 @@ impl PrimeDesktopView {
     }
 
     fn reset_session(&mut self, cx: &mut Context<Self>) {
+        self.follow_tail = true;
+        self.active_selection = ActiveSelection::default();
         self.session = AttachedSessionState::default();
         self.telemetry = SessionTelemetry::default();
         self.catalog_models.clear();
@@ -951,6 +930,7 @@ impl PrimeDesktopView {
             return;
         }
 
+        self.follow_tail = true;
         self.composer_input.update(cx, |inp, cx| {
             inp.record_history(&trimmed);
             inp.clear(cx);
@@ -981,7 +961,7 @@ impl PrimeDesktopView {
                 return;
             }
             "/harness" => {
-                self.open_harness_tab(cx);
+                self.open_harness_tab(window, cx);
                 return;
             }
             "/compact" => {
@@ -1092,6 +1072,7 @@ impl PrimeDesktopView {
             cx.notify();
             return;
         }
+        self.follow_tail = true;
         self.composer_input.update(cx, |inp, cx| {
             inp.record_history(&msg);
             inp.clear(cx);
@@ -1114,28 +1095,6 @@ impl PrimeDesktopView {
         window.focus(&self.composer_input.focus_handle(cx));
     }
 
-    pub fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
-        self.prefs.sidebar_open = !self.prefs.sidebar_open;
-        self.save_preferences();
-        cx.notify();
-    }
-
-    pub fn toggle_inspector(&mut self, cx: &mut Context<Self>) {
-        self.prefs.inspector_open = !self.prefs.inspector_open;
-        self.save_preferences();
-        cx.notify();
-    }
-
-    pub fn set_inspector_tab(&mut self, tab: InspectorTab, cx: &mut Context<Self>) {
-        self.prefs.inspector_open = true;
-        self.prefs.inspector_tab = tab;
-        self.save_preferences();
-        if tab == InspectorTab::Harness || tab == InspectorTab::System {
-            self.reload_local_stores(cx);
-        }
-        cx.notify();
-    }
-
     pub(crate) fn parent_session_target(&self) -> Option<String> {
         let child = self
             .active_sessions
@@ -1153,8 +1112,8 @@ impl PrimeDesktopView {
             .map(|row| row.active_session_id.clone())
     }
 
-    pub fn open_harness_tab(&mut self, cx: &mut Context<Self>) {
-        self.set_inspector_tab(InspectorTab::Harness, cx);
+    pub fn open_harness_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_inspector_tab(InspectorTab::Harness, window, cx);
     }
 
     pub fn toggle_theme(&mut self, cx: &mut Context<Self>) {
@@ -1167,21 +1126,6 @@ impl PrimeDesktopView {
     pub fn cycle_detail_level(&mut self, cx: &mut Context<Self>) {
         self.prefs.detail_level = self.prefs.detail_level.next();
         self.save_preferences();
-        cx.notify();
-    }
-
-    pub fn cycle_thinking_level(&mut self, cx: &mut Context<Self>) {
-        let cur_idx = THINKING_LEVELS
-            .iter()
-            .position(|&l| l == self.session.thinking_level)
-            .unwrap_or(4);
-        let next = THINKING_LEVELS[(cur_idx + 1) % THINKING_LEVELS.len()];
-        if !self.session.active_session_id.is_empty() {
-            self.bridge.send(BridgeRequest::SetThinkingLevel {
-                active_session_id: self.session.active_session_id.clone(),
-                level: next.to_string(),
-            });
-        }
         cx.notify();
     }
 
@@ -1265,16 +1209,11 @@ impl PrimeDesktopView {
         if modal == ActiveModal::SettingsAuth {
             self.reload_local_stores(cx);
         }
+        self.modal_selected_idx = 0;
+        self.modal_scroll.scroll_to_item(0);
         self.active_modal = Some(modal);
         self.modal_search_input.update(cx, TextInput::clear);
-        match modal {
-            ActiveModal::ModelPicker | ActiveModal::QuickSwitcher => {
-                window.focus(&self.modal_search_input.focus_handle(cx));
-            }
-            ActiveModal::SettingsAuth => {
-                window.focus(&self.api_key_input.focus_handle(cx));
-            }
-        }
+        self.focus_active_surface(window, cx);
         cx.notify();
     }
 
@@ -1285,8 +1224,7 @@ impl PrimeDesktopView {
     pub fn close_modal(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.active_modal = None;
         self.api_key_input.update(cx, TextInput::clear);
-        self.renaming_session = false;
-        window.focus(&self.composer_input.focus_handle(cx));
+        self.focus_active_surface(window, cx);
         cx.notify();
     }
 
@@ -1313,12 +1251,12 @@ impl PrimeDesktopView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.active_modal = None;
+        self.close_modal(window, cx);
         match action_id {
             "act-new" => self.start_fresh_session(window, cx),
             "act-model" => self.open_modal(ActiveModal::ModelPicker, window, cx),
             "act-folder" => self.prompt_choose_project_dir(window, cx),
-            "act-harness" => self.open_harness_tab(cx),
+            "act-harness" => self.open_harness_tab(window, cx),
             "act-compact" => self.trigger_compact(cx),
             "act-theme" => self.toggle_theme(cx),
             _ => {}
@@ -1394,16 +1332,7 @@ impl PrimeDesktopView {
     }
 
     pub fn trigger_refine(&mut self, cx: &mut Context<Self>) {
-        if !self.session.active_session_id.is_empty() {
-            self.bridge.send(BridgeRequest::Refine {
-                active_session_id: self.session.active_session_id.clone(),
-                instructions: None,
-                rollback_id: None,
-                global: false,
-            });
-            self.toast = Some(("Running Continual Harness refinement…".to_string(), false));
-            cx.notify();
-        }
+        self.request_refinement(None, false, cx);
     }
 
     pub fn open_new_harness_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1435,7 +1364,7 @@ impl PrimeDesktopView {
         cx.notify();
     }
 
-    pub fn save_harness_editor(&mut self, cx: &mut Context<Self>) {
+    pub fn save_harness_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let title = self.harness_title_input.read(cx).text().trim().to_string();
         let body = self.harness_body_input.read(cx).text().trim().to_string();
         if title.is_empty() || body.is_empty() {
@@ -1457,8 +1386,7 @@ impl PrimeDesktopView {
             },
         ) {
             Ok(_) => {
-                self.harness_editor_open = false;
-                self.harness_editing_id = None;
+                self.close_harness_editor(window, cx);
                 self.reload_local_stores(cx);
                 self.toast = Some(("Saved continual harness entry".to_string(), false));
             }
@@ -1661,6 +1589,17 @@ impl Render for PrimeDesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::for_mode(self.prefs.theme);
         let width = window.viewport_size().width;
+        if width < px(760.0) && self.prefs.inspector_open && self.prefs.sidebar_open {
+            self.prefs.sidebar_open = false;
+            if self
+                .sidebar_search_input
+                .focus_handle(cx)
+                .is_focused(window)
+            {
+                window.focus(&self.composer_input.focus_handle(cx));
+            }
+        }
+        self.schedule_tail_scroll(window, cx);
         let sidebar_docked = self.prefs.sidebar_open && width >= px(760.0);
         let inspector_docked = self.prefs.inspector_open && width >= px(1000.0);
         let sidebar_overlay = self.prefs.sidebar_open && !sidebar_docked;
@@ -1674,6 +1613,9 @@ impl Render for PrimeDesktopView {
             .bg(palette.bg_canvas)
             .text_color(palette.text_primary)
             .font_family(font_sans())
+            .on_action(cx.listener(|view, _: &CopySelection, window, cx| {
+                view.active_selection.copy(window, cx);
+            }))
             // Global Action Handlers
             .on_action(cx.listener(|this, _: &NewSession, window, cx| {
                 this.start_fresh_session(window, cx);
@@ -1693,14 +1635,14 @@ impl Render for PrimeDesktopView {
             .on_action(cx.listener(|this, _: &CycleDetailView, _, cx| {
                 this.cycle_detail_level(cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
-                this.toggle_sidebar(cx);
+            .on_action(cx.listener(|this, _: &ToggleSidebar, window, cx| {
+                this.toggle_sidebar(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &ToggleInspector, _, cx| {
-                this.toggle_inspector(cx);
+            .on_action(cx.listener(|this, _: &ToggleInspector, window, cx| {
+                this.toggle_inspector(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &OpenHarnessStudio, _, cx| {
-                this.open_harness_tab(cx);
+            .on_action(cx.listener(|this, _: &OpenHarnessStudio, window, cx| {
+                this.open_harness_tab(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ToggleSideQuestion, window, cx| {
                 this.toggle_side_question(window, cx);
@@ -1717,30 +1659,7 @@ impl Render for PrimeDesktopView {
             .on_action(cx.listener(|this, _: &OpenSettings, window, cx| {
                 this.open_settings_modal(window, cx);
             }))
-            .on_action(cx.listener(move |this, _: &DismissOverlay, window, cx| {
-                if this.active_modal.is_some() || this.renaming_session {
-                    this.close_modal(window, cx);
-                } else if this.prefs.sidebar_open
-                    && this
-                        .sidebar_search_input
-                        .focus_handle(cx)
-                        .is_focused(window)
-                {
-                    if this.sidebar_search_input.read(cx).text().is_empty() {
-                        window.focus(&this.composer_input.focus_handle(cx));
-                    } else {
-                        this.sidebar_search_input.update(cx, TextInput::clear);
-                    }
-                } else if inspector_overlay {
-                    this.toggle_inspector(cx);
-                } else if sidebar_overlay {
-                    this.toggle_sidebar(cx);
-                } else if this.session.is_streaming && !this.session.active_session_id.is_empty() {
-                    this.bridge.send(BridgeRequest::AbortSession {
-                        active_session_id: this.session.active_session_id.clone(),
-                    });
-                }
-            }))
+            .on_action(cx.listener(Self::dismiss_overlay))
             // Three-Zone Spatial Layout
             .child(
                 div()
@@ -1769,11 +1688,11 @@ impl Render for PrimeDesktopView {
                         .inset_0()
                         .occlude()
                         .bg(palette.bg_scrim)
-                        .on_click(cx.listener(move |view, _, _, cx| {
+                        .on_click(cx.listener(move |view, _, window, cx| {
                             if inspector_overlay {
-                                view.toggle_inspector(cx);
+                                view.toggle_inspector(window, cx);
                             } else {
-                                view.toggle_sidebar(cx);
+                                view.toggle_sidebar(window, cx);
                             }
                         })),
                 )
@@ -1798,6 +1717,8 @@ impl Render for PrimeDesktopView {
                 d.child(
                     div()
                         .id("toast-banner")
+                        .occlude()
+                        .min_w_0()
                         .absolute()
                         .bottom(px(22.0))
                         .right(px(22.0))

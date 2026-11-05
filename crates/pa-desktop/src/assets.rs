@@ -1,9 +1,55 @@
-//! Embedded vector icon assets (`AssetSource`) with zero filesystem overhead.
+//! Embedded typefaces and vector icon assets.
 
 use std::borrow::Cow;
+use std::cell::RefCell;
+use std::sync::{Arc, Weak};
 
 use anyhow::Result;
-use gpui::{AssetSource, Hsla, IntoElement, Pixels, SharedString, Styled, px, svg};
+use gpui::{
+    App, AssetSource, Hsla, IntoElement, Pixels, SharedString, Styled, TextSystem, px, svg,
+};
+
+const EMBEDDED_FONTS: &[&[u8]] = &[
+    include_bytes!("../assets/fonts/GoogleSans-Regular.ttf"),
+    include_bytes!("../assets/fonts/GoogleSans-Medium.ttf"),
+    include_bytes!("../assets/fonts/GoogleSans-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/GoogleSans-Bold.ttf"),
+    include_bytes!("../assets/fonts/GoogleSans-Italic.ttf"),
+    include_bytes!("../assets/fonts/GoogleSans-BoldItalic.ttf"),
+    include_bytes!("../assets/fonts/GoogleSansCode-Regular.ttf"),
+    include_bytes!("../assets/fonts/GoogleSansCode-Medium.ttf"),
+    include_bytes!("../assets/fonts/GoogleSansCode-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/GoogleSansCode-Bold.ttf"),
+    include_bytes!("../assets/fonts/GoogleSansCode-Italic.ttf"),
+    include_bytes!("../assets/fonts/GoogleSansFlex-Regular.ttf"),
+    include_bytes!("../assets/fonts/GoogleSansFlex-Medium.ttf"),
+    include_bytes!("../assets/fonts/GoogleSansFlex-SemiBold.ttf"),
+    include_bytes!("../assets/fonts/GoogleSansFlex-Bold.ttf"),
+];
+
+thread_local! {
+    // A machine may already have some of the families installed. Track our own
+    // registration per GPUI text system, including independent headless apps.
+    static REGISTERED: RefCell<Vec<Weak<TextSystem>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Load the bundled static faces once for this application's text system.
+pub fn register_embedded_fonts(cx: &App) {
+    let system = cx.text_system();
+    REGISTERED.with_borrow_mut(|registered| {
+        registered.retain(|entry| entry.strong_count() > 0);
+        let entry = Arc::downgrade(system);
+        if registered.iter().any(|loaded| loaded.ptr_eq(&entry)) {
+            return;
+        }
+
+        let fonts = EMBEDDED_FONTS.iter().copied().map(Cow::Borrowed).collect();
+        match system.add_fonts(fonts) {
+            Ok(()) => registered.push(entry),
+            Err(error) => eprintln!("Could not register embedded desktop fonts: {error}"),
+        }
+    });
+}
 
 /// Named vector icons embedded directly into the executable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -204,3 +250,6 @@ impl AssetSource for EmbeddedAssets {
             .collect())
     }
 }
+
+#[cfg(test)]
+mod tests;

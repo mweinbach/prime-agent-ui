@@ -10,9 +10,13 @@ use crate::state::transcript::{AssistantBlock, TranscriptEntry};
 use crate::state::{format_tokens_compact, truncate_chars};
 use crate::theme::{DetailLevel, InspectorTab, Palette, font_mono, font_sans, font_serif};
 use crate::ui::composer::render_composer;
-use crate::ui::markdown::render_markdown;
+use crate::ui::markdown::{render_markdown, render_markdown_streaming};
+use crate::ui::selectable_text::{SelectableText, copy_button};
 use crate::ui::sidebar::project_tooltip;
-use crate::ui::tool_cards::{pill, render_agent_mail_card, render_tool_card};
+use crate::ui::syntax::strip_ansi;
+use crate::ui::tool_cards::{
+    pill, render_agent_mail_card, render_console_output, render_tool_card,
+};
 use crate::ui::workspace::PrimeDesktopView;
 
 #[must_use]
@@ -62,7 +66,9 @@ pub fn render_stage(
                                     .rounded_md()
                                     .cursor_pointer()
                                     .hover(|s| s.bg(palette.bg_hover))
-                                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_sidebar(window, cx);
+                                    }))
                                     .child(Icon::Sidebar.render(16.0, palette.text_secondary)),
                             )
                             .child(
@@ -121,8 +127,8 @@ pub fn render_stage(
                                             format!("Show project: {project_cwd}").into(),
                                             palette,
                                         ))
-                                        .on_click(cx.listener(|view, _, _, cx| {
-                                            view.reveal_current_project(cx);
+                                        .on_click(cx.listener(|view, _, window, cx| {
+                                            view.reveal_current_project(window, cx);
                                         }))
                                 })
                                 .child(Icon::Folder.render(13.0, palette.text_muted))
@@ -245,8 +251,8 @@ pub fn render_stage(
                                     .hover(|s| s.bg(palette.bg_hover))
                                     .text_size(px(12.0))
                                     .text_color(palette.text_secondary)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.set_inspector_tab(InspectorTab::Agents, cx);
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.set_inspector_tab(InspectorTab::Agents, window, cx);
                                     }))
                                     .child(Icon::GitBranch.render(13.0, palette.text_secondary))
                                     .child(format!("Subagents {subagent_count}")),
@@ -264,7 +270,9 @@ pub fn render_stage(
                                 .cursor_pointer()
                                 .hover(|s| s.bg(palette.bg_hover))
                                 .when(view.prefs.inspector_open, |d| d.bg(palette.bg_selected))
-                                .on_click(cx.listener(|this, _, _, cx| this.toggle_inspector(cx)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_inspector(window, cx);
+                                }))
                                 .child(Icon::Layers.render(14.0, palette.text_secondary))
                                 .child(
                                     div()
@@ -310,8 +318,8 @@ pub fn render_stage(
                                         .text_size(px(12.5))
                                         .font_weight(FontWeight::MEDIUM)
                                         .text_color(palette.text_primary)
-                                        .whitespace_nowrap()
-                                        .overflow_hidden()
+                                        .min_w_0()
+                                        .truncate()
                                         .child(truncate_chars(obj_text, 76)),
                                 ),
                         )
@@ -341,7 +349,48 @@ pub fn render_stage(
         })
         .when(!empty, |stage| {
             stage
-                .child(render_transcript_scroll(view, palette, cx))
+                .child(
+                    div()
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .flex_col()
+                        .child(render_transcript_scroll(view, palette, cx))
+                        .when(
+                            !view.follow_tail
+                                && view.transcript_scroll.max_offset().height > px(40.0),
+                            |d| {
+                                d.child(
+                                    div()
+                                        .id("jump-to-bottom")
+                                        .debug_selector(|| "jump-to-bottom".to_owned())
+                                        .absolute()
+                                        .bottom(px(8.0))
+                                        .right(px(24.0))
+                                        .occlude()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .px(px(12.0))
+                                        .py(px(6.0))
+                                        .rounded_full()
+                                        .bg(palette.bg_elevated)
+                                        .border_1()
+                                        .border_color(palette.border_subtle)
+                                        .text_size(px(12.0))
+                                        .text_color(palette.text_primary)
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(palette.bg_hover))
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.jump_to_bottom(window, cx);
+                                        }))
+                                        .child(Icon::ArrowDown.render(13.0, palette.text_secondary))
+                                        .child("Jump to bottom"),
+                                )
+                            },
+                        ),
+                )
                 .child(
                     div()
                         .flex_none()
@@ -508,8 +557,17 @@ fn render_transcript_scroll(
                                         .text_size(px(14.5))
                                         .line_height(px(22.0))
                                         .text_color(palette.text_primary)
-                                        .child(text.clone()),
-                                ),
+                                        .child(SelectableText::new(
+                                            format!("{key}-text"),
+                                            text.clone(),
+                                            palette,
+                                        )),
+                                )
+                                .child(div().flex().justify_end().child(copy_button(
+                                    format!("{key}-copy"),
+                                    text.clone(),
+                                    palette,
+                                ))),
                         )
                         .into_any_element(),
                 );
@@ -547,7 +605,7 @@ fn render_transcript_scroll(
                                             .items_center()
                                             .gap(px(6.0))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.session.toggle_expanded(&toggle_t_key);
+                                                this.session.set_expanded(&toggle_t_key, !open);
                                                 cx.notify();
                                             }))
                                             .child(
@@ -581,16 +639,19 @@ fn render_transcript_scroll(
                                                 .text_size(px(13.0))
                                                 .line_height(px(20.0))
                                                 .text_color(palette.text_secondary)
-                                                .child(thought.trim().to_string()),
+                                                .child(render_markdown_streaming(
+                                                    &t_key, thought, *streaming, palette,
+                                                )),
                                         )
                                     })
                                     .into_any_element(),
                             );
                         }
                         AssistantBlock::Text(md) => {
-                            block_els.push(render_markdown(
+                            block_els.push(render_markdown_streaming(
                                 &format!("{key}-md-{b_idx}"),
                                 md,
+                                *streaming,
                                 palette,
                             ));
                         }
@@ -607,18 +668,40 @@ fn render_transcript_scroll(
                             .bg(palette.danger_soft)
                             .text_size(px(13.0))
                             .text_color(palette.danger)
-                            .child(err_msg.clone())
+                            .child(SelectableText::new(
+                                format!("{key}-error"),
+                                err_msg.clone(),
+                                palette,
+                            ))
                             .into_any_element(),
                     );
                 }
+                // Copy the reply's source Markdown, omitting the separate reasoning trace.
+                let reply = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        AssistantBlock::Text(text) => Some(text.as_str()),
+                        AssistantBlock::Thinking(_) => None,
+                    })
+                    .chain(error.as_deref())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
                 rows.push(
                     div()
                         .id(SharedString::from(key.clone()))
                         .w_full()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .gap(px(8.0))
                         .children(block_els)
+                        .when(!reply.is_empty(), |d| {
+                            d.child(div().flex().child(copy_button(
+                                format!("{key}-copy"),
+                                reply,
+                                palette,
+                            )))
+                        })
                         .into_any_element(),
                 );
             }
@@ -668,12 +751,13 @@ fn render_transcript_scroll(
                                 .items_center()
                                 .justify_between()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.session.toggle_expanded(&toggle_k);
+                                    this.session.set_expanded(&toggle_k, !open);
                                     cx.notify();
                                 }))
                                 .child(
                                     div()
                                         .flex()
+                                        .min_w_0()
                                         .items_center()
                                         .gap(px(8.0))
                                         .child(Icon::Terminal.render(13.0, palette.warning))
@@ -682,30 +766,45 @@ fn render_transcript_scroll(
                                                 .font_family(font_mono())
                                                 .text_size(px(12.5))
                                                 .text_color(palette.text_primary)
+                                                .min_w_0()
+                                                .truncate()
                                                 .child(format!("$ {command}")),
                                         ),
                                 )
                                 .child(
                                     div()
-                                        .font_family(font_mono())
-                                        .text_size(px(11.5))
-                                        .text_color(badge.1)
-                                        .child(badge.0),
+                                        .flex()
+                                        .flex_none()
+                                        .items_center()
+                                        .gap(px(5.0))
+                                        .child(copy_button(
+                                            format!("{key}-copy"),
+                                            if output.is_empty() {
+                                                format!("$ {command}")
+                                            } else {
+                                                format!("$ {command}\n{}", strip_ansi(output))
+                                            },
+                                            palette,
+                                        ))
+                                        .child(
+                                            div()
+                                                .whitespace_nowrap()
+                                                .font_family(font_mono())
+                                                .text_size(px(11.5))
+                                                .text_color(badge.1)
+                                                .child(badge.0),
+                                        ),
                                 ),
                         )
-                        .when(open && !output.trim().is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .p(px(11.0))
-                                    .border_t_1()
-                                    .border_color(palette.border_subtle)
-                                    .bg(palette.bg_code)
-                                    .font_family(font_mono())
-                                    .text_size(px(12.0))
-                                    .line_height(px(18.0))
-                                    .text_color(palette.text_secondary)
-                                    .child(output.trim_end().to_string()),
-                            )
+                        .when(open && !output.is_empty(), |d| {
+                            d.child(render_console_output(
+                                key,
+                                "output",
+                                output,
+                                200,
+                                *cancelled || exit_code.is_some_and(|c| c != 0),
+                                palette,
+                            ))
                         })
                         .into_any_element(),
                 );
@@ -757,7 +856,7 @@ fn render_transcript_scroll(
                                 .items_center()
                                 .justify_between()
                                 .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.session.toggle_expanded(&toggle_k);
+                                    this.session.set_expanded(&toggle_k, !open);
                                     cx.notify();
                                 }))
                                 .child(
@@ -842,7 +941,11 @@ fn render_transcript_scroll(
                             div()
                                 .text_size(px(12.5))
                                 .text_color(palette.text_secondary)
-                                .child(summary.clone()),
+                                .child(render_markdown(
+                                    &format!("{key}-summary"),
+                                    summary,
+                                    palette,
+                                )),
                         )
                         .when(!changes.is_empty(), |d| {
                             d.child(
@@ -902,7 +1005,11 @@ fn render_transcript_scroll(
                                 } else {
                                     palette.text_secondary
                                 })
-                                .child(body.clone()),
+                                .child(SelectableText::new(
+                                    format!("{key}-body"),
+                                    body.clone(),
+                                    palette,
+                                )),
                         )
                         .into_any_element(),
                 );
@@ -946,7 +1053,13 @@ fn render_transcript_scroll(
         .id("transcript-scroll-container")
         .flex_1()
         .overflow_y_scroll()
+        .map(|mut scroll| {
+            // A horizontal swipe over code should only move that code's scroll pane.
+            scroll.style().restrict_scroll_to_axis = Some(true);
+            scroll
+        })
         .track_scroll(&view.transcript_scroll)
+        .on_scroll_wheel(cx.listener(PrimeDesktopView::on_transcript_wheel))
         .min_h_0()
         .px(px(24.0))
         .py(px(20.0))
@@ -956,7 +1069,13 @@ fn render_transcript_scroll(
         .child(
             div()
                 .w_full()
+                .id(SharedString::from(format!(
+                    "transcript-{}",
+                    view.session.active_session_id
+                )))
                 .max_w(px(720.0))
+                .min_w_0()
+                .flex_none()
                 .flex()
                 .flex_col()
                 .gap(px(18.0))
@@ -993,7 +1112,12 @@ fn render_side_question_bar(
                         .items_center()
                         .gap(px(8.0))
                         .child(pill("/btw", palette.accent_soft, palette.accent))
-                        .child(div().flex_1().child(view.side_question_input.clone()))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .child(view.side_question_input.clone()),
+                        )
                         .child(
                             div()
                                 .id("sq-ask-btn")
@@ -1030,7 +1154,20 @@ fn render_side_question_bar(
                                     }))
                                     .child("Stop"),
                             )
-                        }),
+                        })
+                        .child(
+                            div()
+                                .id("sq-close")
+                                .flex_none()
+                                .cursor_pointer()
+                                .p(px(5.0))
+                                .rounded_md()
+                                .hover(|s| s.bg(palette.bg_hover))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_side_question(window, cx);
+                                }))
+                                .child(Icon::Close.render(13.0, palette.text_secondary)),
+                        ),
                 )
                 .when(!sq.answer.is_empty(), |d| {
                     d.child(
@@ -1040,7 +1177,23 @@ fn render_side_question_bar(
                             .bg(palette.bg_canvas)
                             .border_1()
                             .border_color(palette.border_subtle)
-                            .child(render_markdown("sq-ans", &sq.answer, palette)),
+                            .child(
+                                div()
+                                    .id("sq-answer-scroll")
+                                    .max_h(px(180.0))
+                                    .overflow_y_scroll()
+                                    .child(render_markdown_streaming(
+                                        "sq-ans",
+                                        &sq.answer,
+                                        sq.running_id.is_some(),
+                                        palette,
+                                    )),
+                            )
+                            .child(div().flex().justify_end().child(copy_button(
+                                "sq-copy",
+                                sq.answer.clone(),
+                                palette,
+                            ))),
                     )
                 })
                 .when_some(sq.error.as_ref(), |d, err| {
@@ -1048,7 +1201,7 @@ fn render_side_question_bar(
                         div()
                             .text_size(px(12.0))
                             .text_color(palette.danger)
-                            .child(err.clone()),
+                            .child(SelectableText::new("sq-error", err.clone(), palette)),
                     )
                 }),
         )

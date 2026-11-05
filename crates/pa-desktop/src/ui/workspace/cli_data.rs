@@ -11,6 +11,7 @@ impl PrimeDesktopView {
     ) -> AnyElement {
         let choose = div()
             .id("choose-cli-folder")
+            .flex_none()
             .cursor_pointer()
             .py(px(4.0))
             .text_color(palette.accent)
@@ -38,7 +39,7 @@ impl PrimeDesktopView {
             .flex().flex_col().gap(px(5.0))
             .child(div().text_size(px(13.0)).font_weight(FontWeight::SEMIBOLD).child("Prime Agent CLI data"))
             .child(div().text_size(px(12.0)).text_color(palette.text_secondary).child("Chats, saved credentials and settings are shared with the CLI in this folder."))
-            .child(div().text_size(px(11.0)).font_family(crate::theme::font_mono()).text_color(palette.text_muted).child(self.agent_dir.display().to_string()))
+            .child(div().min_w_0().truncate().text_size(px(11.0)).font_family(crate::theme::font_mono()).text_color(palette.text_muted).child(self.agent_dir.display().to_string()))
             .child(div().flex().items_center().gap(px(12.0)).text_size(px(12.0)).child(choose)
                 .when(self.prefs.cli_data_dir.is_some(), |row| row.child(div()
                     .id("reset-cli-folder").cursor_pointer().text_color(palette.accent)

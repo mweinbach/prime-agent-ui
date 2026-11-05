@@ -27,6 +27,8 @@ pub fn render_inspector(
 
     div()
         .w(px(328.0))
+        .max_w_full()
+        .min_w_0()
         .h_full()
         .flex_none()
         .flex()
@@ -85,8 +87,8 @@ pub fn render_inspector(
                                 } else {
                                     palette.text_secondary
                                 })
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.set_inspector_tab(tab, cx);
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.set_inspector_tab(tab, window, cx);
                                 }))
                                 .child(tab.label())
                         })),
@@ -499,9 +501,7 @@ fn render_subagent(
             live.filter(|row| {
                 view.agent_mail_target.as_deref() == Some(row.active_session_id.as_str())
             }),
-            |card, row| {
-                let parent_id = view.session.active_session_id.clone();
-                let target_id = row.active_session_id.clone();
+            |card, _| {
                 card.child(
                     div()
                         .mt(px(3.0))
@@ -529,31 +529,15 @@ fn render_subagent(
                                     "Dismiss",
                                     palette.bg_hover,
                                     palette.text_secondary,
-                                    cx.listener(|this, _, _, cx| {
-                                        this.agent_mail_target = None;
-                                        cx.notify();
-                                    }),
+                                    cx.listener(|this, _, window, cx| this.close_mail(window, cx)),
                                 ))
                                 .child(small_btn(
                                     "send-agent-mail-btn",
                                     "Send message",
                                     palette.accent,
                                     palette.text_on_accent,
-                                    cx.listener(move |this, _, _, cx| {
-                                        let message =
-                                            this.agent_mail_input.read(cx).text().trim().to_owned();
-                                        if message.is_empty() {
-                                            return;
-                                        }
-                                        this.bridge.send(BridgeRequest::SendAgentMessage {
-                                            from_active_session_id: Some(parent_id.clone()),
-                                            target_active_session_id: target_id.clone(),
-                                            message,
-                                        });
-                                        this.agent_mail_input
-                                            .update(cx, crate::ui::text_input::TextInput::clear);
-                                        this.agent_mail_target = None;
-                                        cx.notify();
+                                    cx.listener(|this, _, window, cx| {
+                                        this.submit_agent_mail(window, cx);
                                     }),
                                 )),
                         ),
@@ -576,8 +560,6 @@ fn render_harness_tab(
         .iter()
         .filter(|e| view.harness_kind_filter.is_none_or(|k| e.kind == k))
         .collect::<Vec<_>>();
-    let sid = view.session.active_session_id.clone();
-
     let kinds: [(Option<RefinementKind>, &str); 5] = [
         (None, "All"),
         (Some(RefinementKind::Memory), "Memory"),
@@ -659,25 +641,13 @@ fn render_harness_tab(
                 .items_center()
                 .gap(px(7.0))
                 .child(Icon::Sparkles.render(13.5, palette.accent))
-                .child(div().flex_1().child(view.refine_input.clone()))
+                .child(div().flex_1().min_w_0().child(view.refine_input.clone()))
                 .child(small_btn(
                     "trigger-refine-btn",
                     "Refine",
                     palette.accent_soft,
                     palette.accent,
-                    cx.listener(move |this, _, _, cx| {
-                        if !sid.is_empty() {
-                            let instr = this.refine_input.read(cx).text().trim().to_string();
-                            this.bridge.send(BridgeRequest::Refine {
-                                active_session_id: sid.clone(),
-                                instructions: (!instr.is_empty()).then_some(instr),
-                                rollback_id: None,
-                                global: matches!(this.harness_scope, HarnessScope::Global),
-                            });
-                            this.refine_input
-                                .update(cx, crate::ui::text_input::TextInput::clear);
-                        }
-                    }),
+                    cx.listener(|this, _, _, cx| this.submit_refinement(cx)),
                 )),
         )
         // Inline Create / Edit Form
@@ -754,20 +724,14 @@ fn render_harness_tab(
                                 "Cancel",
                                 palette.bg_hover,
                                 palette.text_secondary,
-                                cx.listener(|this, _, _, cx| {
-                                    this.harness_editor_open = false;
-                                    this.harness_editing_id = None;
-                                    cx.notify();
-                                }),
+                                cx.listener(|this, _, window, cx| this.close_harness_editor(window, cx)),
                             ))
                             .child(small_btn(
                                 "save-harness-edit",
                                 "Save entry",
                                 palette.accent,
                                 palette.text_on_accent,
-                                cx.listener(|this, _, _, cx| {
-                                    this.save_harness_editor(cx);
-                                }),
+                                cx.listener(|this, _, window, cx| this.save_harness_editor(window, cx)),
                             )),
                     ),
             )
@@ -965,9 +929,6 @@ fn render_runtime_tab(
     palette: Palette,
     cx: &mut Context<PrimeDesktopView>,
 ) -> AnyElement {
-    let sid = view.session.active_session_id.clone();
-    let sid_sched = sid.clone();
-
     div()
         .flex()
         .flex_col()
@@ -1003,17 +964,7 @@ fn render_runtime_tab(
                             "Run",
                             palette.accent,
                             palette.text_on_accent,
-                            cx.listener(move |this, _, _, cx| {
-                                let cmd = this.quick_bash_input.read(cx).text().trim().to_string();
-                                if !cmd.is_empty() && !sid.is_empty() {
-                                    this.bridge.send(BridgeRequest::ExecuteBash {
-                                        active_session_id: sid.clone(),
-                                        command: cmd,
-                                    });
-                                    this.quick_bash_input
-                                        .update(cx, crate::ui::text_input::TextInput::clear);
-                                }
-                            }),
+                            cx.listener(|this, _, _, cx| this.submit_quick_bash(cx)),
                         )),
                 ),
         )
@@ -1178,29 +1129,7 @@ fn render_runtime_tab(
                     "+ Heartbeat",
                     palette.accent_soft,
                     palette.accent,
-                    cx.listener(move |this, _, _, cx| {
-                        let sched = this
-                            .schedule_interval_input
-                            .read(cx)
-                            .text()
-                            .trim()
-                            .to_string();
-                        let prompt = this
-                            .schedule_prompt_input
-                            .read(cx)
-                            .text()
-                            .trim()
-                            .to_string();
-                        if !sched.is_empty() && !prompt.is_empty() && !sid_sched.is_empty() {
-                            this.bridge.send(BridgeRequest::CreateHeartbeat {
-                                active_session_id: sid_sched.clone(),
-                                schedule: sched,
-                                prompt,
-                            });
-                            this.schedule_prompt_input
-                                .update(cx, crate::ui::text_input::TextInput::clear);
-                        }
-                    }),
+                    cx.listener(|this, _, _, cx| this.submit_heartbeat(cx)),
                 )))
                 .children(view.schedules.iter().map(|job| {
                     let jid = job.id.clone();
@@ -1260,7 +1189,6 @@ fn render_system_tab(
     let sid = view.session.active_session_id.clone();
     let sid_compact_policy = sid.clone();
     let sid_retry_policy = sid.clone();
-    let sid_mcp = sid.clone();
     let missing = "Not reported";
 
     div()
@@ -1537,19 +1465,7 @@ fn render_system_tab(
                             "Add",
                             palette.accent_soft,
                             palette.accent,
-                            cx.listener(move |this, _, _, cx| {
-                                let srv = this.mcp_server_input.read(cx).text().trim().to_string();
-                                let tok = this.mcp_token_input.read(cx).text().trim().to_string();
-                                if !srv.is_empty() && !tok.is_empty() && !sid_mcp.is_empty() {
-                                    this.bridge.send(BridgeRequest::SetMcpToken {
-                                        active_session_id: sid_mcp.clone(),
-                                        server: srv,
-                                        token: tok,
-                                    });
-                                    this.mcp_token_input
-                                        .update(cx, crate::ui::text_input::TextInput::clear);
-                                }
-                            }),
+                            cx.listener(|this, _, _, cx| this.submit_mcp_token(cx)),
                         )),
                 ),
         )
@@ -1651,6 +1567,8 @@ fn stat_row(label: &str, value: &str, palette: Palette) -> AnyElement {
                 .font_family(font_mono())
                 .text_size(px(12.0))
                 .text_color(palette.text_primary)
+                .truncate()
+                .min_w_0()
                 .child(value.to_string()),
         )
         .into_any_element()
@@ -1701,6 +1619,8 @@ fn small_btn(
 ) -> gpui::Stateful<gpui::Div> {
     div()
         .id(SharedString::from(id.to_string()))
+        .flex_none()
+        .whitespace_nowrap()
         .px(px(8.5))
         .py(px(4.0))
         .rounded_md()

@@ -29,6 +29,18 @@ impl CatalogModel {
         provider_display_name(&self.provider)
     }
 
+    /// Wrap within this model's advertised effort levels, including the first selection.
+    pub(crate) fn next_thinking_level(&self, current: &str) -> Option<&str> {
+        let mut levels = self.supported_levels.iter().map(String::as_str);
+        let first = levels.clone().next()?;
+        let next = if levels.any(|level| level == current) {
+            levels.next().unwrap_or(first)
+        } else {
+            first
+        };
+        (next != current).then_some(next)
+    }
+
     #[must_use]
     pub fn matches_query(&self, query: &str) -> bool {
         let q = query.trim().to_ascii_lowercase();
@@ -48,7 +60,7 @@ impl CatalogModel {
 }
 
 /// Standard Prime Agent thinking effort levels.
-pub const THINKING_LEVELS: [&str; 6] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+pub const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 #[must_use]
 pub fn provider_display_name(provider: &str) -> &str {
@@ -148,17 +160,23 @@ fn parse_one_model(item: &Value, configured: &HashSet<String>) -> Option<Catalog
         .and_then(Value::as_u64)
         .unwrap_or(8_192);
 
-    let mut supported_levels: Vec<String> = Vec::new();
-    if let Some(level_map) = obj.get("thinkingLevelMap").and_then(Value::as_object) {
-        for level in THINKING_LEVELS {
-            if level_map.contains_key(level) {
-                supported_levels.push(level.to_string());
+    // The wire map is sparse. An explicit null disables a level; xhigh and max
+    // require an explicit provider mapping. Older catalog rows can omit the map.
+    let map = obj.get("thinkingLevelMap").and_then(Value::as_object);
+    let supports_thinking = reasoning || map.is_some_and(|map| map.values().any(Value::is_string));
+    let supported_levels = THINKING_LEVELS
+        .into_iter()
+        .filter(|level| {
+            if !supports_thinking {
+                return *level == "off";
             }
-        }
-    }
-    if supported_levels.is_empty() && reasoning {
-        supported_levels = THINKING_LEVELS.iter().map(|s| (*s).to_string()).collect();
-    }
+            match map.and_then(|map| map.get(*level)) {
+                Some(mapped) => mapped.is_string(),
+                None => !matches!(*level, "xhigh" | "max"),
+            }
+        })
+        .map(str::to_owned)
+        .collect();
 
     Some(CatalogModel {
         configured: configured.contains(&provider),
@@ -171,4 +189,22 @@ fn parse_one_model(item: &Value, configured: &HashSet<String>) -> Option<Catalog
         max_tokens,
         supported_levels,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn cycle_skips_disabled_efforts_and_includes_mapped_max() {
+        let (models, _) = parse_model_catalog(&json!({"models":[{
+            "provider":"example", "id":"sparse", "reasoning":true,
+            "thinkingLevelMap":{"off":null,"minimal":null,"high":null,"medium":null,"max":"maximum"}
+        }]}));
+        let model = &models[0];
+        assert_eq!(model.supported_levels, ["low", "max"]);
+        assert_eq!(model.next_thinking_level("low"), Some("max"));
+        assert_eq!(model.next_thinking_level("max"), Some("low"));
+    }
 }

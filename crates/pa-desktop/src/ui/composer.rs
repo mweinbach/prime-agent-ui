@@ -6,10 +6,11 @@ use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
 use crate::state::{ActiveModal, truncate_chars};
 use crate::theme::{Palette, font_mono};
+use crate::ui::text_input::{Down, Up};
 use crate::ui::tool_cards::pill;
-use crate::ui::workspace::PrimeDesktopView;
+use crate::ui::workspace::{CompleteSlash, PrimeDesktopView};
 
-const SLASH_SUGGESTIONS: [(&str, &str); 9] = [
+const SLASH_SUGGESTIONS: [(&str, &str); 8] = [
     ("/compact", "Summarize & compact conversation context"),
     ("/refine", "Refine the session harness"),
     (
@@ -33,8 +34,18 @@ const SLASH_SUGGESTIONS: [(&str, &str); 9] = [
         "/harness",
         "Open Continual Harness Studio (memories, skills, prompts)",
     ),
-    ("!", "Run a shell command in the session folder"),
 ];
+
+pub(super) fn slash_matches(draft: &str) -> Vec<(&'static str, &'static str)> {
+    if !draft.starts_with('/') || draft.contains(char::is_whitespace) {
+        return Vec::new();
+    }
+    SLASH_SUGGESTIONS
+        .iter()
+        .copied()
+        .filter(|(command, _)| command.starts_with(draft) && *command != draft)
+        .collect()
+}
 
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -48,19 +59,26 @@ pub fn render_composer(
     let is_bash_bang = trimmed.starts_with('!');
     let is_streaming = view.session.is_streaming;
 
-    // Matching slash commands when user types `/...` on a single line.
-    let slash_matches: Vec<(&'static str, &'static str)> =
-        if draft.starts_with('/') && !draft.contains(char::is_whitespace) {
-            SLASH_SUGGESTIONS
-                .iter()
-                .copied()
-                .filter(|(cmd, _)| cmd.starts_with(trimmed) && *cmd != draft)
-                .collect()
-        } else {
-            Vec::new()
-        };
+    let slash_matches = slash_matches(&draft);
+    let match_count = slash_matches.len();
 
     div()
+        .when(match_count > 0, |d| {
+            d.key_context("PaCompletions")
+                .capture_action(cx.listener(move |view, _: &Up, _, cx| {
+                    view.slash_selected_idx = view.slash_selected_idx.saturating_sub(1);
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .capture_action(cx.listener(move |view, _: &Down, _, cx| {
+                    view.slash_selected_idx = (view.slash_selected_idx + 1).min(match_count - 1);
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_action(cx.listener(|view, _: &CompleteSlash, window, cx| {
+                    view.complete_slash(window, cx);
+                }))
+        })
         .w_full()
         .flex()
         .justify_center()
@@ -88,35 +106,42 @@ pub fn render_composer(
                             .flex()
                             .flex_col()
                             .gap(px(2.0))
-                            .children(slash_matches.into_iter().map(|(cmd, desc)| {
-                                div()
-                                    .id(SharedString::from(format!("slash-opt-{cmd}")))
-                                    .px(px(10.0))
-                                    .py(px(6.0))
-                                    .rounded_lg()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(palette.bg_hover))
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.populate_draft(cmd, window, cx);
-                                    }))
-                                    .child(
-                                        div()
-                                            .font_family(font_mono())
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_size(px(12.5))
-                                            .text_color(palette.accent)
-                                            .child(cmd),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .text_color(palette.text_secondary)
-                                            .child(desc),
-                                    )
-                            })),
+                            .children(slash_matches.into_iter().enumerate().map(
+                                |(index, (cmd, desc))| {
+                                    div()
+                                        .id(SharedString::from(format!("slash-opt-{cmd}")))
+                                        .when(index == view.slash_selected_idx, |d| {
+                                            d.bg(palette.bg_selected)
+                                        })
+                                        .px(px(10.0))
+                                        .py(px(6.0))
+                                        .rounded_lg()
+                                        .cursor_pointer()
+                                        .hover(|s| s.bg(palette.bg_hover))
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.populate_draft(cmd, window, cx);
+                                        }))
+                                        .child(
+                                            div()
+                                                .font_family(font_mono())
+                                                .font_weight(FontWeight::MEDIUM)
+                                                .text_size(px(12.5))
+                                                .text_color(palette.accent)
+                                                .child(cmd),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(12.0))
+                                                .text_color(palette.text_secondary)
+                                                .min_w_0()
+                                                .truncate()
+                                                .child(desc),
+                                        )
+                                },
+                            )),
                     )
                 })
                 // Main Floating Composer Card
@@ -248,6 +273,8 @@ pub fn render_composer(
                                             d.child(
                                                 div()
                                                     .id("composer-effort-pill")
+                                                    .flex_none()
+                                                    .whitespace_nowrap()
                                                     .px(px(7.0))
                                                     .py(px(5.0))
                                                     .rounded_md()
@@ -294,6 +321,9 @@ pub fn render_composer(
                                                 div()
                                                     .text_size(px(11.5))
                                                     .text_color(palette.text_muted)
+                                                    .font_family(font_mono())
+                                                    .flex_none()
+                                                    .whitespace_nowrap()
                                                     .child(format!("{percent:.0}% context")),
                                             )
                                         })
@@ -442,6 +472,8 @@ fn render_queued_strip(
                 .flex()
                 .items_center()
                 .gap(px(8.0))
+                .flex_1()
+                .min_w_0()
                 .overflow_hidden()
                 .child(pill(
                     &format!("Queued ({total})"),
@@ -452,8 +484,8 @@ fn render_queued_strip(
                     div()
                         .text_size(px(12.0))
                         .text_color(palette.text_secondary)
-                        .whitespace_nowrap()
-                        .overflow_hidden()
+                        .min_w_0()
+                        .truncate()
                         .child(
                             view.session
                                 .queued
@@ -470,6 +502,8 @@ fn render_queued_strip(
                 .flex()
                 .items_center()
                 .gap(px(6.0))
+                .flex_none()
+                .whitespace_nowrap()
                 .child(
                     div()
                         .id("queue-send-now-btn")

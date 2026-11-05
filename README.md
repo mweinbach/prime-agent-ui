@@ -66,4 +66,4 @@ git commit -m "Update the pinned Prime Agent harness"
 
 If a dependency change makes the desktop lockfile stale, run `cargo tree -p pa-desktop` to update it, review `Cargo.lock`, and include it with the pin. Push changes to the harness fork **before** publishing a desktop pin that references them. See [Contributing](CONTRIBUTING.md) for making harness changes and bringing upstream fixes into the fork.
 
-**Licenses:** [Prime Agent](LICENSE) · [Desktop icons](crates/pa-desktop/ICON-LICENSE) · [Harness and export assets](harness/crates/pa-core/assets/export-html/NOTICE.md).
+**Licenses:** [Prime Agent](LICENSE) · [Desktop icons](crates/pa-desktop/ICON-LICENSE) · [Desktop fonts](crates/pa-desktop/FONT-LICENSE) · [Harness and export assets](harness/crates/pa-core/assets/export-html/NOTICE.md).

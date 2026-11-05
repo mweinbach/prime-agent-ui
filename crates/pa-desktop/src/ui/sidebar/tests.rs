@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
+use gpui::{Entity, Focusable as _, Modifiers, TestAppContext, VisualTestContext, px, size};
 use serde_json::json;
 
 use crate::state::SavedSessionRow;
@@ -153,5 +153,37 @@ fn search_reaches_beyond_the_project_preview_and_history_projects_can_be_pinned(
     let prefs = DesktopPreferences::load(profile.path());
     assert!(prefs.project_folders.iter().any(|cwd| cwd == ARCHIVE));
     view.read_with(cx, |view, _| assert_eq!(view.working_cwd, ALPHA));
+    app.quit();
+}
+
+#[test]
+fn narrow_drawers_are_exclusive_and_opening_a_chat_returns_focus_to_the_composer() {
+    let profile = tempfile::TempDir::new().unwrap();
+    let mut app = TestAppContext::single();
+    let (view, cx) = open_sidebar(&mut app, profile.path(), vec![saved(ALPHA, "history")]);
+    cx.simulate_resize(size(px(700.), px(640.)));
+    draw(cx);
+    view.update_in(cx, |view, window, cx| {
+        assert!(view.prefs.sidebar_open);
+        view.toggle_inspector(window, cx);
+        assert!(view.prefs.inspector_open);
+        assert!(!view.prefs.sidebar_open);
+        view.toggle_sidebar(window, cx);
+        assert!(view.prefs.sidebar_open);
+        assert!(!view.prefs.inspector_open);
+        window.focus(&view.sidebar_search_input.focus_handle(cx));
+        assert!(
+            view.sidebar_search_input
+                .focus_handle(cx)
+                .is_focused(window)
+        );
+    });
+    // The search field owns focus when selecting the only saved session row.
+    click(cx, "saved-chat");
+    view.update_in(cx, |view, window, cx| {
+        assert!(!view.prefs.sidebar_open);
+        assert!(!view.prefs.inspector_open);
+        assert!(view.composer_input.focus_handle(cx).is_focused(window));
+    });
     app.quit();
 }

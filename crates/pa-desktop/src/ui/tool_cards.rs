@@ -1,14 +1,20 @@
 //! Interactive transcript cards for `python_repl`, `bash`, `edit` diffs,
 //! inter-agent mail, subagent outcomes, compactions, and continual-harness refinements.
 
-use gpui::{AnyElement, ClipboardItem, Context, FontWeight, SharedString, div, prelude::*, px};
+mod lines;
+
+pub(super) use lines::{horizontal_scroll, limited_lines};
+
+use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
 use pa_types::ai::is_python_tool_name;
 
 use crate::assets::Icon;
 use crate::state::transcript::{DiffView, MailKind, ToolCard};
 use crate::state::truncate_chars;
 use crate::theme::{DetailLevel, Palette, font_mono, font_sans};
-use crate::ui::markdown::render_code_block;
+use crate::ui::markdown::{render_code_block, render_markdown};
+use crate::ui::selectable_text::{SelectableText, copy_button};
+use crate::ui::syntax::{highlight, strip_ansi};
 use crate::ui::workspace::PrimeDesktopView;
 
 /// Render a tool invocation card (`python_repl`, `bash`, `edit`, or generic).
@@ -58,7 +64,11 @@ pub fn render_tool_card(
     let py_diff_count =
         card.python.as_ref().map_or(0, |p| p.diffs.len()) + usize::from(card.edit_diff.is_some());
     let py_mail_count = card.python.as_ref().map_or(0, |p| p.sent_mail.len());
-    let copy_code = card.code_or_cmd.clone();
+    let copy_code = if let Some(diff) = &card.edit_diff {
+        diff.unified.as_str()
+    } else {
+        &card.code_or_cmd
+    };
 
     div()
         .w_full()
@@ -83,7 +93,7 @@ pub fn render_tool_card(
                 .cursor_pointer()
                 .hover(|s| s.bg(palette.bg_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.session.toggle_expanded(&toggle_key);
+                    this.session.set_expanded(&toggle_key, !expanded);
                     cx.notify();
                 }))
                 .child(
@@ -91,6 +101,7 @@ pub fn render_tool_card(
                         .flex()
                         .items_center()
                         .gap(px(8.0))
+                        .min_w_0()
                         .overflow_hidden()
                         .child(
                             if expanded {
@@ -120,8 +131,8 @@ pub fn render_tool_card(
                                 .text_size(px(12.5))
                                 .font_family(font_mono())
                                 .text_color(palette.text_secondary)
-                                .whitespace_nowrap()
-                                .overflow_hidden()
+                                .min_w_0()
+                                .truncate()
                                 .child(first_line),
                         ),
                 )
@@ -152,21 +163,12 @@ pub fn render_tool_card(
                                 palette.info,
                             ))
                         })
-                        .when(expanded && !copy_code.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .id(SharedString::from(format!("{key}-copy")))
-                                    .p(px(3.0))
-                                    .rounded_sm()
-                                    .hover(|s| s.bg(palette.bg_hover))
-                                    .on_click(move |_, _, cx| {
-                                        cx.stop_propagation();
-                                        cx.write_to_clipboard(ClipboardItem::new_string(
-                                            copy_code.clone(),
-                                        ));
-                                    })
-                                    .child(Icon::Copy.render(12.0, palette.text_muted)),
-                            )
+                        .when(!copy_code.is_empty(), |d| {
+                            d.child(copy_button(
+                                format!("{key}-copy"),
+                                copy_code.to_owned(),
+                                palette,
+                            ))
                         })
                         .child(
                             div()
@@ -203,7 +205,7 @@ pub fn render_tool_card(
             }
 
             if let Some(ref diff) = card.edit_diff {
-                body = body.child(render_diff_card(diff, palette));
+                body = body.child(render_diff_card(&format!("{key}-edit-diff"), diff, palette));
             }
 
             if let Some(ref py) = card.python {
@@ -224,8 +226,12 @@ pub fn render_tool_card(
                             .child(truncate_chars(cmd, 80)),
                     );
                 }
-                for d in &py.diffs {
-                    body = body.child(render_diff_card(d, palette));
+                for (idx, d) in py.diffs.iter().enumerate() {
+                    body = body.child(render_diff_card(
+                        &format!("{key}-py-diff-{idx}"),
+                        d,
+                        palette,
+                    ));
                 }
                 if !py.sent_mail.is_empty() {
                     let mut mail_row = div().flex().flex_wrap().gap(px(6.0));
@@ -239,32 +245,35 @@ pub fn render_tool_card(
                     body = body.child(mail_row);
                 }
 
-                let combined_out = [
-                    py.stdout.trim_end(),
-                    py.return_value.as_deref().unwrap_or_default(),
-                    py.background_output.as_deref().unwrap_or_default(),
+                let mut combined_out = String::new();
+                for part in [
+                    Some(py.stdout.as_str()),
+                    py.return_value.as_deref(),
+                    py.background_output.as_deref(),
                 ]
                 .into_iter()
+                .flatten()
                 .filter(|s| !s.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n");
+                {
+                    if !combined_out.is_empty() && !combined_out.ends_with('\n') {
+                        combined_out.push('\n');
+                    }
+                    combined_out.push_str(part);
+                }
 
                 if !combined_out.is_empty() {
                     body = body.child(render_console_output(
+                        &key,
                         "stdout",
                         &combined_out,
-                        detail.expand_tool_output(),
+                        if detail.expand_tool_output() { 120 } else { 18 },
                         false,
                         palette,
                     ));
                 }
-                if !py.stderr.trim().is_empty() {
+                if !py.stderr.is_empty() {
                     body = body.child(render_console_output(
-                        "stderr",
-                        py.stderr.trim_end(),
-                        true,
-                        true,
-                        palette,
+                        &key, "stderr", &py.stderr, 120, true, palette,
                     ));
                 }
                 if let Some(ref ename) = py.error_name {
@@ -273,13 +282,25 @@ pub fn render_tool_card(
                     } else {
                         py.traceback.join("\n")
                     };
-                    body = body.child(render_console_output("traceback", &tb, true, true, palette));
+                    body = body.child(render_console_output(
+                        &key,
+                        "traceback",
+                        &tb,
+                        120,
+                        true,
+                        palette,
+                    ));
                 }
-            } else if !card.text_output.trim().is_empty() {
+            } else if !card.text_output.is_empty() {
                 body = body.child(render_console_output(
+                    &key,
                     "output",
-                    card.text_output.trim_end(),
-                    detail.expand_tool_output() || card.is_error,
+                    &card.text_output,
+                    if detail.expand_tool_output() || card.is_error {
+                        120
+                    } else {
+                        18
+                    },
                     card.is_error,
                     palette,
                 ));
@@ -314,46 +335,22 @@ pub fn render_tool_card(
                         .gap(px(6.0))
                         .px(px(12.0))
                         .pb(px(10.0))
-                        .children(diffs.into_iter().map(|d| render_diff_card(d, palette))),
+                        .children(diffs.into_iter().enumerate().map(|(idx, d)| {
+                            render_diff_card(&format!("{key}-compact-diff-{idx}"), d, palette)
+                        })),
                 )
             }
         })
         .into_any_element()
 }
 
-fn render_diff_card(diff: &DiffView, palette: Palette) -> AnyElement {
-    let lines: Vec<AnyElement> = diff
-        .unified
-        .lines()
-        .take(80)
-        .map(|line| {
-            let (bg, fg) = if line.starts_with('+') && !line.starts_with("+++") {
-                (palette.success_soft, palette.success)
-            } else if line.starts_with('-') && !line.starts_with("---") {
-                (palette.danger_soft, palette.danger)
-            } else {
-                (gpui::transparent_black(), palette.text_muted)
-            };
-            div()
-                .w_full()
-                .px(px(8.0))
-                .bg(bg)
-                .text_color(fg)
-                .font_family(font_mono())
-                .text_size(px(12.0))
-                .line_height(px(18.0))
-                .whitespace_nowrap()
-                .child(if line.is_empty() {
-                    " ".to_string()
-                } else {
-                    line.to_string()
-                })
-                .into_any_element()
-        })
-        .collect();
-
+fn render_diff_card(key: &str, diff: &DiffView, palette: Palette) -> AnyElement {
+    let text: SharedString = diff.unified.clone().into();
+    let scroll_id = SharedString::from(format!("{key}-scroll"));
+    let text_id = SharedString::from(format!("{key}-text"));
     div()
         .w_full()
+        .min_w_0()
         .rounded_lg()
         .border_1()
         .border_color(palette.border_subtle)
@@ -363,63 +360,72 @@ fn render_diff_card(diff: &DiffView, palette: Palette) -> AnyElement {
             div()
                 .flex()
                 .items_center()
-                .justify_between()
+                .gap(px(6.0))
                 .px(px(10.0))
                 .py(px(5.0))
                 .border_b_1()
                 .border_color(palette.border_subtle)
                 .bg(palette.bg_elevated)
+                .font_family(font_mono())
+                .text_size(px(12.0))
                 .child(
                     div()
-                        .font_family(font_mono())
-                        .text_size(px(12.0))
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
                         .text_color(palette.text_primary)
                         .child(diff.path.clone()),
                 )
                 .child(
                     div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .font_family(font_mono())
-                        .text_size(px(11.5))
-                        .child(
-                            div()
-                                .text_color(palette.success)
-                                .child(format!("+{}", diff.added_lines)),
-                        )
-                        .child(
-                            div()
-                                .text_color(palette.danger)
-                                .child(format!("-{}", diff.removed_lines)),
-                        ),
-                ),
+                        .flex_none()
+                        .text_color(palette.success)
+                        .child(format!("+{}", diff.added_lines)),
+                )
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(palette.danger)
+                        .child(format!("-{}", diff.removed_lines)),
+                )
+                .child(copy_button(format!("{key}-copy"), text.clone(), palette)),
         )
-        .child(
-            div()
-                .id(SharedString::from(format!("diff-scroll-{}", diff.path)))
+        .child(limited_lines(
+            format!("{key}-lines"),
+            text,
+            80,
+            palette,
+            move |visible| {
+                horizontal_scroll(
+                    scroll_id,
+                    SelectableText::new(text_id, visible.to_owned(), palette)
+                        .with_runs(highlight("diff", visible, palette)),
+                )
                 .py(px(4.0))
-                .overflow_x_scroll()
-                .flex()
-                .flex_col()
-                .children(lines),
-        )
+                .px(px(8.0))
+                .text_size(px(12.0))
+                .line_height(px(18.0))
+                .into_any_element()
+            },
+        ))
         .into_any_element()
 }
 
-fn render_console_output(
+pub(super) fn render_console_output(
+    key: &str,
     label: &str,
     output: &str,
-    show_full: bool,
+    max_lines: usize,
     is_error: bool,
     palette: Palette,
 ) -> AnyElement {
-    let max_lines = if show_full { 120 } else { 18 };
-    let all_lines: Vec<&str> = output.lines().collect();
-    let shown = all_lines.iter().take(max_lines);
-
+    let text: SharedString = strip_ansi(output).into();
+    let id = format!("{key}-{label}");
+    let scroll_id = SharedString::from(format!("{id}-scroll"));
+    let text_id = SharedString::from(format!("{id}-text"));
     div()
         .w_full()
+        .min_w_0()
         .rounded_lg()
         .border_1()
         .border_color(if is_error {
@@ -429,22 +435,32 @@ fn render_console_output(
         })
         .bg(palette.bg_code)
         .p(px(10.0))
-        .flex()
-        .flex_col()
-        .gap(px(3.0))
         .child(
             div()
-                .text_size(px(10.5))
+                .flex()
+                .items_center()
+                .justify_between()
+                .pb(px(4.0))
                 .font_family(font_mono())
+                .text_size(px(10.5))
                 .text_color(if is_error {
                     palette.danger
                 } else {
                     palette.text_muted
                 })
-                .child(label.to_uppercase()),
+                .child(label.to_uppercase())
+                .child(copy_button(format!("{id}-copy"), text.clone(), palette)),
         )
-        .children(shown.map(|line| {
-            div()
+        .child(limited_lines(
+            format!("{id}-lines"),
+            text,
+            max_lines,
+            palette,
+            move |visible| {
+                horizontal_scroll(
+                    scroll_id,
+                    SelectableText::new(text_id, visible.to_owned(), palette),
+                )
                 .font_family(font_mono())
                 .text_size(px(12.0))
                 .line_height(px(17.5))
@@ -453,26 +469,9 @@ fn render_console_output(
                 } else {
                     palette.text_secondary
                 })
-                .child((*line).to_string())
-        }))
-        .when(all_lines.len() > max_lines, |d| {
-            let shortcut = if cfg!(target_os = "macos") {
-                "⌘O"
-            } else {
-                "Ctrl+O"
-            };
-            d.child(
-                div()
-                    .pt(px(4.0))
-                    .font_family(font_mono())
-                    .text_size(px(11.0))
-                    .text_color(palette.text_muted)
-                    .child(format!(
-                        "… {} more lines (switch view to All with {shortcut})",
-                        all_lines.len() - max_lines
-                    )),
-            )
-        })
+                .into_any_element()
+            },
+        ))
         .into_any_element()
 }
 
@@ -539,7 +538,7 @@ pub fn render_agent_mail_card(
                 .cursor_pointer()
                 .hover(|s| s.bg(palette.bg_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
-                    this.session.toggle_expanded(&toggle_key);
+                    this.session.set_expanded(&toggle_key, !expanded);
                     cx.notify();
                 }))
                 .child(
@@ -554,6 +553,8 @@ pub fn render_agent_mail_card(
                                 .font_family(font_sans())
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(palette.text_primary)
+                                .min_w_0()
+                                .truncate()
                                 .child(headline),
                         ),
                 )
@@ -576,7 +577,7 @@ pub fn render_agent_mail_card(
                     .text_size(px(13.0))
                     .line_height(px(20.0))
                     .text_color(palette.text_secondary)
-                    .child(body.trim().to_string()),
+                    .child(render_markdown(&format!("{key}-body"), body, palette)),
             )
         })
         .into_any_element()
@@ -585,6 +586,8 @@ pub fn render_agent_mail_card(
 #[must_use]
 pub fn pill(text: &str, bg: gpui::Hsla, fg: gpui::Hsla) -> AnyElement {
     div()
+        .flex_none()
+        .whitespace_nowrap()
         .px(px(7.0))
         .py(px(2.0))
         .rounded_md()

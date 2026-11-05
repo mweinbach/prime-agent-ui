@@ -1,6 +1,10 @@
 //! Session transcript state: snapshot reconstruction and live `session_event` folding.
 
-use std::collections::HashSet;
+mod edit_diff;
+
+use std::collections::HashMap;
+
+use edit_diff::build_edit_arg_diff;
 
 use pa_types::ai::is_python_tool_name;
 use pa_types::goal::GoalState;
@@ -197,7 +201,7 @@ pub struct AttachedSessionState {
     pub goal: Option<GoalState>,
     pub queued: QueuedLaneState,
     pub entries: Vec<TranscriptEntry>,
-    pub toggled_keys: HashSet<String>,
+    expansion_overrides: HashMap<String, bool>,
     pub side_question: SideQuestionState,
     next_seq: u64,
     snapshot_buffer: Vec<Value>,
@@ -254,19 +258,16 @@ impl AttachedSessionState {
         }
     }
 
-    pub fn toggle_expanded(&mut self, key: &str) {
-        if !self.toggled_keys.remove(key) {
-            self.toggled_keys.insert(key.to_string());
-        }
+    pub fn set_expanded(&mut self, key: &str, open: bool) {
+        self.expansion_overrides.insert(key.to_owned(), open);
     }
 
     #[must_use]
     pub fn is_expanded(&self, key: &str, default_open: bool) -> bool {
-        if self.toggled_keys.contains(key) {
-            !default_open
-        } else {
-            default_open
-        }
+        self.expansion_overrides
+            .get(key)
+            .copied()
+            .unwrap_or(default_open)
     }
 
     /// Reconstruct from an `attach` / `create` response payload or `SessionAttached` snapshot.
@@ -941,6 +942,19 @@ impl AttachedSessionState {
                     )
                 })
             {
+                // Some providers finish with only the answer after streaming a separate trace.
+                // Keep that trace at its original position so the open disclosure remains stable.
+                if !streaming
+                    && !blocks
+                        .iter()
+                        .any(|block| matches!(block, AssistantBlock::Thinking(_)))
+                {
+                    for (index, block) in existing_blocks.drain(..).enumerate() {
+                        if matches!(block, AssistantBlock::Thinking(_)) {
+                            blocks.insert(index.min(blocks.len()), block);
+                        }
+                    }
+                }
                 *existing_blocks = blocks;
                 *existing_stream = streaming;
                 if model_label.is_some() {
@@ -1266,41 +1280,6 @@ fn extract_tool_primary_source(name: &str, args: &Value) -> String {
     }
 }
 
-fn build_edit_arg_diff(args: &Value) -> Option<DiffView> {
-    let obj = args.as_object()?;
-    let path = obj.get("path")?.as_str()?.to_string();
-    let old_str = obj
-        .get("old_str")
-        .or_else(|| obj.get("oldText"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let new_str = obj
-        .get("new_str")
-        .or_else(|| obj.get("newText"))
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    if old_str.is_empty() && new_str.is_empty() {
-        return None;
-    }
-    let mut lines = Vec::new();
-    let mut removed = 0usize;
-    let mut added = 0usize;
-    for l in old_str.lines() {
-        removed += 1;
-        lines.push(format!("-{l}"));
-    }
-    for l in new_str.lines() {
-        added += 1;
-        lines.push(format!("+{l}"));
-    }
-    Some(DiffView {
-        path,
-        unified: lines.join("\n"),
-        added_lines: added,
-        removed_lines: removed,
-    })
-}
-
 fn extract_content_text(payload: &Value) -> Option<String> {
     match payload.get("content") {
         Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
@@ -1459,6 +1438,40 @@ fn parse_python_details(details: &Value, fallback_text: &str) -> PythonCellDetai
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn completed_answer_keeps_the_open_streamed_thinking_trace() {
+        let mut session = AttachedSessionState::default();
+        session.apply_live_event(
+            &json!({"type":"message_start","message":{"role":"assistant",
+            "content":[{"type":"thinking","thinking":"Reading **files**"}]}}),
+        );
+        let TranscriptEntry::Assistant { key, .. } = &session.entries[0] else {
+            panic!()
+        };
+        let trace_key = format!("{key}-think-0");
+        session.set_expanded(&trace_key, true);
+        session.apply_live_event(&json!({"type":"message_end","message":{"role":"assistant",
+            "content":[{"type":"text","text":"Found it"}]}}));
+        let TranscriptEntry::Assistant {
+            key,
+            blocks,
+            streaming,
+            ..
+        } = &session.entries[0]
+        else {
+            panic!()
+        };
+        assert!(!streaming);
+        assert!(session.is_expanded(&format!("{key}-think-0"), false));
+        assert_eq!(
+            blocks,
+            &[
+                AssistantBlock::Thinking("Reading **files**".into()),
+                AssistantBlock::Text("Found it".into())
+            ]
+        );
+    }
 
     #[test]
     fn folds_streaming_assistant_and_python_repl_lifecycle() {

@@ -97,6 +97,7 @@ impl PrimeDesktopView {
         if !matches!(self.selection, SessionSelection::Idle) || cwd.is_empty() {
             return;
         }
+        self.close_sidebar_overlay(window, cx);
         self.auto_attach = false;
         self.stash_draft(cx);
         self.reset_session(cx);

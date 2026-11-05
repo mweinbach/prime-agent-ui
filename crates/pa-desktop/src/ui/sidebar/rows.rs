@@ -9,7 +9,7 @@ use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
 use crate::state::projects::ProjectGroup;
 use crate::state::{ActiveSessionRow, SavedSessionRow};
-use crate::theme::Palette;
+use crate::theme::{Palette, font_mono};
 use crate::ui::modals::confirm_action;
 use crate::ui::workspace::PrimeDesktopView;
 
@@ -45,7 +45,10 @@ fn project_heading(
         Icon::FolderOpen
     };
     let label = div()
-        .id("project-heading")
+        .id(SharedString::from(format!(
+            "project-heading-{}",
+            group.key()
+        )))
         .h_full()
         .min_w_0()
         .flex_1()
@@ -162,6 +165,7 @@ pub(super) fn render_project(
             slot.child(
                 div()
                     .px(px(3.0))
+                    .font_family(font_mono())
                     .text_size(px(10.5))
                     .text_color(palette.text_muted)
                     .when(folder.is_some(), |n| {
@@ -325,7 +329,8 @@ pub(super) fn render_active_agent_row(
         chat_hint(&row.name, state, &row.cwd),
         palette,
     ))
-    .on_click(cx.listener(move |view, _, _, cx| {
+    .on_click(cx.listener(move |view, _, window, cx| {
+        view.close_sidebar_overlay(window, cx);
         view.open_session(
             BridgeRequest::AttachSession {
                 active_session_id: sid.clone(),
@@ -400,7 +405,8 @@ pub(super) fn render_saved_row(
         chat_hint(&row.name, "Saved chat", &row.cwd),
         palette,
     ))
-    .on_click(cx.listener(move |view, _, _, cx| {
+    .on_click(cx.listener(move |view, _, window, cx| {
+        view.close_sidebar_overlay(window, cx);
         view.open_session(
             BridgeRequest::OpenSavedSession {
                 session_path: open_path.clone(),
@@ -426,6 +432,7 @@ pub(super) fn render_saved_row(
                     slot.child(
                         div()
                             .px(px(3.0))
+                            .font_family(font_mono())
                             .text_size(px(10.5))
                             .text_color(palette.text_muted)
                             .group_hover("chat-row", gpui::Styled::invisible)

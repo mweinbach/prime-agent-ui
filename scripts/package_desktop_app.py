@@ -163,7 +163,11 @@ def parse_workspace_version(repo_root: Path) -> str:
     raise SystemExit(f"Missing workspace version in {repo_root / 'Cargo.toml'}")
 
 
-DESKTOP_NOTICES = ("LICENSE", "crates/pa-desktop/ICON-LICENSE")
+DESKTOP_NOTICES = (
+    "LICENSE",
+    "crates/pa-desktop/ICON-LICENSE",
+    "crates/pa-desktop/FONT-LICENSE",
+)
 HARNESS_NOTICES = {
     "LICENSE": "LICENSE",
     "vendor/crossterm/LICENSE": "crossterm/LICENSE",

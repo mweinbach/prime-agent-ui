@@ -1,13 +1,16 @@
 //! Overlay modals: Searchable Model Picker (`⌘M`), Quick Switcher / Command Palette (`⌘K`),
 //! and Provider Credentials & Desktop Settings (`⌘,`).
 
-use gpui::{AnyElement, Context, Focusable, FontWeight, SharedString, div, prelude::*, px};
+use gpui::{
+    AnyElement, App, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px,
+};
 
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
 use crate::state::harness_store::ProviderAuthItem;
 use crate::state::{ActiveModal, format_tokens_compact, truncate_chars};
 use crate::theme::{Palette, font_mono, font_sans, font_serif};
+use crate::ui::text_input::{Down, Up};
 use crate::ui::tool_cards::pill;
 use crate::ui::workspace::PrimeDesktopView;
 
@@ -67,6 +70,7 @@ pub fn render_active_modal(
         .child(
             div()
                 .id("modal-card-surface")
+                .min_w_0()
                 .w_full()
                 .max_w(px(610.0))
                 .max_h_full()
@@ -86,15 +90,10 @@ fn render_model_picker_modal(
     palette: Palette,
     cx: &mut Context<PrimeDesktopView>,
 ) -> AnyElement {
-    let query = view.modal_search_input.read(cx).text().to_string();
-    let filtered: Vec<_> = view
-        .catalog_models
-        .iter()
-        .filter(|m| (!view.model_picker_configured_only || m.configured) && m.matches_query(&query))
-        .take(90)
-        .collect();
+    let filtered = matching_models(view, cx);
+    let count = filtered.len();
 
-    div()
+    picker_surface(count, cx)
         .w_full()
         .max_h(px(520.0))
         .rounded_2xl()
@@ -154,6 +153,8 @@ fn render_model_picker_modal(
                                         .on_click(cx.listener(|this, _, _, cx| {
                                             this.model_picker_configured_only =
                                                 !this.model_picker_configured_only;
+                                            this.modal_selected_idx = 0;
+                                            this.modal_scroll.scroll_to_item(0);
                                             cx.notify();
                                         }))
                                         .child(if view.model_picker_configured_only {
@@ -186,13 +187,14 @@ fn render_model_picker_modal(
                         .items_center()
                         .gap(px(8.0))
                         .child(Icon::Search.render(14.0, palette.accent))
-                        .child(div().flex_1().child(view.modal_search_input.clone())),
+                        .child(div().flex_1().min_w_0().child(view.modal_search_input.clone())),
                 ),
         )
         // Model Rows
         .child(
             div()
                 .id("model-picker-scroll")
+                .track_scroll(&view.modal_scroll)
                 .flex_1()
                 .overflow_y_scroll()
                 .p(px(8.0))
@@ -208,7 +210,7 @@ fn render_model_picker_modal(
                             .child("No matching models. Try another search or change the provider filter."),
                     )
                 })
-                .children(filtered.into_iter().map(|m| {
+                .children(filtered.into_iter().enumerate().map(|(index, m)| {
                     let is_current = view.session.model_provider.as_deref()
                         == Some(m.provider.as_str())
                         && view.session.model_id.as_deref() == Some(m.id.as_str());
@@ -216,12 +218,12 @@ fn render_model_picker_modal(
                     let mid = m.id.clone();
 
                     div()
-                        .id(SharedString::from(format!("pick-m-{}/{}", m.provider, m.id)))
+                        .id(SharedString::from(format!("pick-m-{}/{}", m.provider, m.id))).flex_none().min_w_0()
                         .px(px(12.0))
                         .py(px(8.5))
                         .rounded_xl()
                         .cursor_pointer()
-                        .bg(if is_current {
+                        .bg(if index == view.modal_selected_idx.min(count.saturating_sub(1)) {
                             palette.bg_selected
                         } else {
                             gpui::transparent_black()
@@ -239,7 +241,7 @@ fn render_model_picker_modal(
                                 .flex()
                                 .flex_col()
                                 .gap(px(2.0))
-                                .overflow_hidden()
+                                .min_w_0().flex_1().overflow_hidden()
                                 .child(
                                     div()
                                         .flex()
@@ -251,7 +253,7 @@ fn render_model_picker_modal(
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_size(px(13.0))
                                                 .text_color(palette.text_primary)
-                                                .child(m.name.clone()),
+                                                .min_w_0().truncate().child(m.name.clone()),
                                         )
                                         .when(is_current, |d| {
                                             d.child(Icon::Check.render(13.0, palette.accent))
@@ -262,7 +264,7 @@ fn render_model_picker_modal(
                                         .font_family(font_mono())
                                         .text_size(px(11.0))
                                         .text_color(palette.text_muted)
-                                        .child(format!("{} · {}", m.provider_display(), m.id)),
+                                        .min_w_0().truncate().child(format!("{} · {}", m.provider_display(), m.id)),
                                 ),
                         )
                         .child(
@@ -288,18 +290,108 @@ fn render_model_picker_modal(
         .into_any_element()
 }
 
-fn render_quick_switcher_modal(
-    view: &PrimeDesktopView,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
+fn matching_models<'a>(
+    view: &'a PrimeDesktopView,
+    cx: &App,
+) -> Vec<&'a crate::state::models::CatalogModel> {
+    let query = view.modal_search_input.read(cx).text();
+    view.catalog_models
+        .iter()
+        .filter(|m| (!view.model_picker_configured_only || m.configured) && m.matches_query(query))
+        .take(90)
+        .collect()
+}
+
+// Arrow keys belong to the result list while the search field retains text entry and IME focus.
+fn picker_surface(count: usize, cx: &Context<PrimeDesktopView>) -> gpui::Div {
+    div()
+        .capture_action(cx.listener(move |view, _: &Up, _, cx| {
+            view.modal_selected_idx = view
+                .modal_selected_idx
+                .saturating_sub(1)
+                .min(count.saturating_sub(1));
+            view.modal_scroll.scroll_to_item(view.modal_selected_idx);
+            cx.stop_propagation();
+            cx.notify();
+        }))
+        .capture_action(cx.listener(move |view, _: &Down, _, cx| {
+            view.modal_selected_idx = (view.modal_selected_idx + 1).min(count.saturating_sub(1));
+            view.modal_scroll.scroll_to_item(view.modal_selected_idx);
+            cx.stop_propagation();
+            cx.notify();
+        }))
+}
+
+enum SwitchTarget {
+    Command(&'static str),
+    Project(String),
+    Chat(BridgeRequest),
+}
+
+struct SwitchRow {
+    id: String,
+    title: String,
+    hint: String,
+    target: SwitchTarget,
+}
+
+impl SwitchTarget {
+    fn activate(
+        &self,
+        view: &mut PrimeDesktopView,
+        window: &mut Window,
+        cx: &mut Context<PrimeDesktopView>,
+    ) {
+        match self {
+            Self::Command(id) => view.execute_palette_action(id, window, cx),
+            Self::Project(cwd) => {
+                view.close_modal(window, cx);
+                if !view.prefs.sidebar_open {
+                    view.toggle_sidebar(window, cx);
+                }
+                view.focus_sidebar_project(cwd, cx);
+                window.focus(&view.sidebar_search_input.focus_handle(cx));
+            }
+            Self::Chat(request) => {
+                view.open_session(request.clone(), cx);
+                view.close_modal(window, cx);
+            }
+        }
+    }
+}
+
+impl PrimeDesktopView {
+    pub(super) fn submit_modal_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        match self.active_modal {
+            Some(ActiveModal::ModelPicker) => {
+                let models = matching_models(self, cx);
+                if let Some(model) =
+                    models.get(self.modal_selected_idx.min(models.len().saturating_sub(1)))
+                {
+                    let (provider, id) = (model.provider.clone(), model.id.clone());
+                    self.select_model(&provider, &id, window, cx);
+                }
+            }
+            Some(ActiveModal::QuickSwitcher) => {
+                let rows = switch_rows(self, cx);
+                if let Some(row) =
+                    rows.get(self.modal_selected_idx.min(rows.len().saturating_sub(1)))
+                {
+                    row.target.activate(self, window, cx);
+                }
+            }
+            Some(ActiveModal::SettingsAuth) | None => {}
+        }
+    }
+}
+
+fn switch_rows(view: &PrimeDesktopView, cx: &App) -> Vec<SwitchRow> {
     let q = view
         .modal_search_input
         .read(cx)
         .text()
         .trim()
         .to_ascii_lowercase();
-
     let actions = [
         ("act-new", "New chat in this project", "⌘N", "Ctrl+N"),
         ("act-model", "Switch model", "⌘M", "Ctrl+M"),
@@ -324,27 +416,87 @@ fn render_quick_switcher_modal(
         ),
     ];
 
-    let matching_actions = actions
+    let mut rows = actions
         .into_iter()
-        .filter(|(_, label, _, _)| q.is_empty() || label.to_ascii_lowercase().contains(&q));
-
-    let groups = view.project_groups(&q);
-    let project_rows = groups
-        .iter()
-        .filter_map(|g| {
-            let cwd = g.folder()?;
-            (q.is_empty() && g.added
-                || !q.is_empty()
-                    && (cwd.to_lowercase().contains(&q) || g.label.to_lowercase().contains(&q)))
-            .then_some((g, cwd.to_owned()))
+        .filter(|(_, label, _, _)| label.to_ascii_lowercase().contains(&q))
+        .map(|(id, title, mac, other)| SwitchRow {
+            id: id.to_owned(),
+            title: title.to_owned(),
+            hint: (if cfg!(target_os = "macos") {
+                mac
+            } else {
+                other
+            })
+            .to_owned(),
+            target: SwitchTarget::Command(id),
         })
-        .take(8);
-    let chats = groups
-        .iter()
-        .flat_map(|group| group.chats.iter().map(move |chat| (chat, &group.label)))
-        .take(20);
+        .collect::<Vec<_>>();
+    let groups = view.project_groups(&q);
+    rows.extend(
+        groups
+            .iter()
+            .filter_map(|group| {
+                let cwd = group.folder()?;
+                (if q.is_empty() {
+                    group.added
+                } else {
+                    cwd.to_lowercase().contains(&q) || group.label.to_lowercase().contains(&q)
+                })
+                .then(|| SwitchRow {
+                    id: format!("switch-project-{cwd}"),
+                    title: group.label.clone(),
+                    hint: String::new(),
+                    target: SwitchTarget::Project(cwd.to_owned()),
+                })
+            })
+            .take(8),
+    );
+    rows.extend(
+        groups
+            .iter()
+            .flat_map(|group| group.chats.iter().map(move |chat| (chat, &group.label)))
+            .take(20)
+            .map(|(chat, project)| {
+                let (title, request) = match *chat {
+                    crate::state::projects::ProjectChat::Live(i) => {
+                        let row = &view.active_sessions[i];
+                        (
+                            &row.name,
+                            BridgeRequest::AttachSession {
+                                active_session_id: row.active_session_id.clone(),
+                            },
+                        )
+                    }
+                    crate::state::projects::ProjectChat::Saved(i) => {
+                        let row = &view.saved_sessions[i];
+                        (
+                            &row.name,
+                            BridgeRequest::OpenSavedSession {
+                                session_path: row.path.clone(),
+                                cwd: (!row.cwd.is_empty()).then(|| row.cwd.clone()),
+                            },
+                        )
+                    }
+                };
+                SwitchRow {
+                    id: format!("switch-chat-{chat:?}"),
+                    title: truncate_chars(title, 46),
+                    hint: project.clone(),
+                    target: SwitchTarget::Chat(request),
+                }
+            }),
+    );
+    rows
+}
 
-    div()
+fn render_quick_switcher_modal(
+    view: &PrimeDesktopView,
+    palette: Palette,
+    cx: &mut Context<PrimeDesktopView>,
+) -> AnyElement {
+    let rows = switch_rows(view, cx);
+    let count = rows.len();
+    picker_surface(count, cx)
         .w_full()
         .max_h(px(480.0))
         .rounded_2xl()
@@ -364,124 +516,77 @@ fn render_quick_switcher_modal(
                 .items_center()
                 .gap(px(8.0))
                 .child(Icon::Search.render(15.0, palette.accent))
-                .child(div().flex_1().child(view.modal_search_input.clone())),
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .child(view.modal_search_input.clone()),
+                ),
         )
         .child(
             div()
                 .id("quick-switcher-scroll")
+                .track_scroll(&view.modal_scroll)
                 .flex_1()
                 .overflow_y_scroll()
                 .p(px(8.0))
                 .flex()
                 .flex_col()
                 .gap(px(3.0))
-                .children(matching_actions.map(|(id, label, mac, other)| {
-                    let shortcut = if cfg!(target_os = "macos") {
-                        mac
-                    } else {
-                        other
-                    };
+                .when(rows.is_empty(), |d| {
+                    d.child(
+                        div()
+                            .p(px(16.0))
+                            .text_color(palette.text_secondary)
+                            .child("No matching commands, projects, or chats."),
+                    )
+                })
+                .children(rows.into_iter().enumerate().map(|(index, row)| {
+                    let project = matches!(row.target, SwitchTarget::Project(_));
+                    let command = matches!(row.target, SwitchTarget::Command(_));
                     div()
-                        .id(SharedString::from(id))
+                        .id(SharedString::from(row.id))
+                        .flex_none()
+                        .min_w_0()
                         .px(px(12.0))
                         .py(px(8.0))
                         .rounded_lg()
                         .cursor_pointer()
-                        .hover(|s| s.bg(palette.bg_hover))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.execute_palette_action(id, window, cx);
-                        }))
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .text_color(palette.text_primary)
-                                .child(label),
+                        .when(
+                            index == view.modal_selected_idx.min(count.saturating_sub(1)),
+                            |d| d.bg(palette.bg_selected),
                         )
-                        .child(
-                            div()
-                                .font_family(font_mono())
-                                .text_size(px(11.0))
-                                .text_color(palette.text_muted)
-                                .child(shortcut),
-                        )
-                }))
-                .children(project_rows.map(|(project, cwd)| {
-                    div()
-                        .id(SharedString::from(format!("switch-project-{cwd}")))
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .cursor_pointer()
-                        .rounded_lg()
                         .hover(|s| s.bg(palette.bg_hover))
                         .flex()
                         .items_center()
                         .gap(px(8.0))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.close_modal(window, cx);
-                            if !this.prefs.sidebar_open {
-                                this.toggle_sidebar(cx);
-                            }
-                            this.focus_sidebar_project(&cwd, cx);
-                            window.focus(&this.sidebar_search_input.focus_handle(cx));
+                        .on_click(cx.listener(move |view, _, window, cx| {
+                            row.target.activate(view, window, cx);
                         }))
-                        .child(Icon::Folder.render(14.0, palette.accent))
-                        .child(project.label.clone())
-                }))
-                .children(chats.map(|(chat, project)| {
-                    let (title, request) = match *chat {
-                        crate::state::projects::ProjectChat::Live(i) => {
-                            let row = &view.active_sessions[i];
-                            (
-                                &row.name,
-                                BridgeRequest::AttachSession {
-                                    active_session_id: row.active_session_id.clone(),
-                                },
-                            )
-                        }
-                        crate::state::projects::ProjectChat::Saved(i) => {
-                            let row = &view.saved_sessions[i];
-                            (
-                                &row.name,
-                                BridgeRequest::OpenSavedSession {
-                                    session_path: row.path.clone(),
-                                    cwd: (!row.cwd.is_empty()).then(|| row.cwd.clone()),
-                                },
-                            )
-                        }
-                    };
-                    div()
-                        .id(SharedString::from(format!("switch-chat-{chat:?}")))
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .rounded_lg()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(palette.bg_hover))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(6.0))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_session(request.clone(), cx);
-                            this.close_modal(window, cx);
-                        }))
+                        .when(project, |d| {
+                            d.child(Icon::Folder.render(14.0, palette.accent))
+                        })
                         .child(
                             div()
+                                .min_w_0()
+                                .flex_1()
                                 .truncate()
                                 .text_size(px(13.0))
                                 .text_color(palette.text_primary)
-                                .child(truncate_chars(title, 46)),
+                                .child(row.title),
                         )
-                        .child(
-                            div()
-                                .truncate()
-                                .max_w(px(150.0))
-                                .text_size(px(11.0))
-                                .text_color(palette.text_muted)
-                                .child(project.clone()),
-                        )
+                        .when(!row.hint.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .min_w_0()
+                                    .max_w(px(150.0))
+                                    .truncate()
+                                    .when(command, |d| d.font_family(font_mono()).flex_none())
+                                    .text_size(px(11.0))
+                                    .text_color(palette.text_muted)
+                                    .child(row.hint),
+                            )
+                        })
                 })),
         )
         .into_any_element()
@@ -576,6 +681,8 @@ fn render_settings_auth_modal(
                                         .font_family(font_mono())
                                         .text_size(px(11.0))
                                         .text_color(palette.text_muted)
+                                        .min_w_0()
+                                        .truncate()
                                         .child(view.daemon_socket_display.clone()),
                                 ),
                         )
@@ -583,6 +690,8 @@ fn render_settings_auth_modal(
                             card.child(
                                 div()
                                     .id("settings-switch-daemon-btn")
+                                    .flex_none()
+                                    .whitespace_nowrap()
                                     .px(px(10.0))
                                     .py(px(5.0))
                                     .rounded_lg()

@@ -1,466 +1,348 @@
-//! Fast `pulldown-cmark` Markdown -> GPUI element renderer with syntax-tinted code blocks.
+//! `CommonMark` and GFM transcript blocks, rendered with native GPUI text runs.
 
+mod document;
+mod streaming;
+#[cfg(test)]
+mod tests;
+
+use std::borrow::Cow;
 use std::ops::Range;
 
+use document::{Block, Inline, Kind};
 use gpui::{
-    AnyElement, ClipboardItem, FontStyle, FontWeight, HighlightStyle, IntoElement, SharedString,
-    StyledText, UnderlineStyle, div, prelude::*, px,
+    AnyElement, FontStyle, FontWeight, Hsla, IntoElement, SharedString, StrikethroughStyle,
+    TextAlign, TextRun, UnderlineStyle, div, font, prelude::*, px,
 };
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, BlockQuoteKind, HeadingLevel};
 
+use super::selectable_text::{SelectableText, copy_button};
+use super::syntax;
+use super::tool_cards::{horizontal_scroll, limited_lines};
 use crate::assets::Icon;
-use crate::theme::{Palette, font_mono, font_sans, font_serif};
+use crate::theme::{Palette, font_display, font_mono, font_sans};
 
-type Highlights = Vec<(Range<usize>, HighlightStyle)>;
-type ListItemRow = (usize, String, String, Highlights);
-
-// StyledText takes non-overlapping byte ranges. Markdown emphasis, code, and links can nest.
-fn inline_highlights(
-    text: &str,
-    spans: Highlights,
-) -> impl Iterator<Item = (Range<usize>, HighlightStyle)> + use<> {
-    let len = text.trim_end().len();
-    gpui::combine_highlights(
-        spans
-            .into_iter()
-            .map(move |(r, style)| (r.start.min(len)..r.end.min(len), style)),
-        [],
-    )
+/// Render a complete Markdown document.
+#[must_use]
+pub fn render_markdown(id_prefix: &str, markdown: &str, palette: Palette) -> AnyElement {
+    render_markdown_streaming(id_prefix, markdown, false, palette)
 }
 
-/// Render Markdown prose & code blocks into a vertical stack of GPUI elements.
+/// Render a streaming prefix without exposing incomplete fence or link delimiters.
 #[must_use]
-#[allow(clippy::too_many_lines)]
-pub fn render_markdown(id_prefix: &str, markdown: &str, palette: Palette) -> AnyElement {
-    let mut opts = Options::empty();
-    opts.insert(Options::ENABLE_STRIKETHROUGH);
-    opts.insert(Options::ENABLE_TABLES);
-    opts.insert(Options::ENABLE_TASKLISTS);
-
-    let parser = Parser::new_ext(markdown, opts);
-    let mut children: Vec<AnyElement> = Vec::new();
-
-    let mut inline_text = String::new();
-    let mut highlights: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
-    let mut bold_start: Option<usize> = None;
-    let mut italic_start: Option<usize> = None;
-    let mut link_start: Option<usize> = None;
-
-    let mut heading_level: Option<HeadingLevel> = None;
-    let mut in_blockquote = false;
-    let mut in_code_block = false;
-    let mut code_lang = String::new();
-    let mut code_buf = String::new();
-
-    let mut list_stack: Vec<Option<u64>> = Vec::new();
-    let mut list_items: Vec<ListItemRow> = Vec::new();
-    let mut in_item = false;
-
-    let mut in_table = false;
-    let mut table_rows: Vec<Vec<String>> = Vec::new();
-    let mut current_row: Vec<String> = Vec::new();
-    let mut cell_buf = String::new();
-    let mut in_cell = false;
-
-    let mut block_idx = 0usize;
-
-    let flush_paragraph = |text: &mut String,
-                           spans: &mut Vec<(Range<usize>, HighlightStyle)>,
-                           quote: bool,
-                           out: &mut Vec<AnyElement>| {
-        let trimmed_len = text.trim_end().len();
-        if trimmed_len == 0 {
-            text.clear();
-            spans.clear();
-            return;
-        }
-        text.truncate(trimmed_len);
-        let runs = inline_highlights(text, std::mem::take(spans));
-        let body = StyledText::new(SharedString::from(std::mem::take(text))).with_highlights(runs);
-        let elem = if quote {
-            div()
-                .pl(px(12.0))
-                .py(px(4.0))
-                .border_l_2()
-                .border_color(palette.accent)
-                .bg(palette.bg_hover)
-                .rounded_r_md()
-                .text_size(px(14.0))
-                .line_height(px(22.0))
-                .text_color(palette.text_secondary)
-                .font_family(font_sans())
-                .child(body)
-                .into_any_element()
-        } else {
-            div()
-                .text_size(px(14.5))
-                .line_height(px(23.0))
-                .text_color(palette.text_primary)
-                .font_family(font_sans())
-                .child(body)
-                .into_any_element()
-        };
-        out.push(elem);
+pub fn render_markdown_streaming(
+    id_prefix: &str,
+    markdown: &str,
+    streaming: bool,
+    palette: Palette,
+) -> AnyElement {
+    let source = if streaming {
+        streaming::normalize(markdown)
+    } else {
+        Cow::Borrowed(markdown)
     };
+    Renderer {
+        prefix: id_prefix,
+        serial: 0,
+        palette,
+    }
+    .block(document::parse(&source), &TypeStyle::body(palette))
+}
 
-    for event in parser {
-        match event {
-            Event::Start(tag) => match tag {
-                Tag::Heading { level, .. } => {
-                    flush_paragraph(
-                        &mut inline_text,
-                        &mut highlights,
-                        in_blockquote,
-                        &mut children,
-                    );
-                    heading_level = Some(level);
+struct Renderer<'a> {
+    prefix: &'a str,
+    serial: usize,
+    palette: Palette,
+}
+
+#[derive(Clone)]
+struct TypeStyle {
+    family: SharedString,
+    weight: FontWeight,
+    ink: Hsla,
+}
+
+impl TypeStyle {
+    fn body(palette: Palette) -> Self {
+        Self {
+            family: font_sans(),
+            weight: FontWeight::NORMAL,
+            ink: palette.text_primary,
+        }
+    }
+}
+
+type Links = Vec<(Range<usize>, String)>;
+
+fn inline_runs(inline: &Inline, base: &TypeStyle, palette: Palette) -> (Vec<TextRun>, Links) {
+    let mut links: Links = Vec::new();
+    let runs = inline
+        .spans
+        .iter()
+        .map(|(range, style)| {
+            let mut face = font(if style.code {
+                font_mono()
+            } else {
+                base.family.clone()
+            });
+            face.weight = if style.bold {
+                FontWeight::BOLD
+            } else if style.code && base.weight < FontWeight::MEDIUM {
+                FontWeight::MEDIUM
+            } else {
+                base.weight
+            };
+            if style.italic {
+                face.style = FontStyle::Italic;
+            }
+            if let Some(url) = &style.link {
+                if let Some((previous, previous_url)) = links.last_mut()
+                    && previous.end == range.start
+                    && previous_url.as_str() == url.as_ref()
+                {
+                    previous.end = range.end;
+                } else {
+                    links.push((range.clone(), url.to_string()));
                 }
-                Tag::BlockQuote(_) => {
-                    flush_paragraph(
-                        &mut inline_text,
-                        &mut highlights,
-                        in_blockquote,
-                        &mut children,
-                    );
-                    in_blockquote = true;
-                }
-                Tag::CodeBlock(kind) => {
-                    flush_paragraph(
-                        &mut inline_text,
-                        &mut highlights,
-                        in_blockquote,
-                        &mut children,
-                    );
-                    in_code_block = true;
-                    code_buf.clear();
-                    code_lang = match kind {
-                        CodeBlockKind::Fenced(info) => info
-                            .split_whitespace()
-                            .next()
-                            .unwrap_or_default()
-                            .to_string(),
-                        CodeBlockKind::Indented => String::new(),
+            }
+            let ink = if style.link.is_some() {
+                palette.info
+            } else if style.code || style.checkbox {
+                palette.accent
+            } else {
+                base.ink
+            };
+            TextRun {
+                len: range.len(),
+                font: face,
+                color: ink,
+                background_color: style.code.then_some(palette.bg_code),
+                underline: style.link.as_ref().map(|_| UnderlineStyle {
+                    color: Some(ink),
+                    thickness: px(1.0),
+                    wavy: false,
+                }),
+                strikethrough: style.strike.then_some(StrikethroughStyle {
+                    thickness: px(1.0),
+                    color: Some(ink),
+                }),
+            }
+        })
+        .collect();
+    (runs, links)
+}
+
+impl Renderer<'_> {
+    fn id(&mut self) -> String {
+        self.serial += 1;
+        format!("{}-md-{}", self.prefix, self.serial)
+    }
+
+    fn block(&mut self, block: Block, style: &TypeStyle) -> AnyElement {
+        let palette = self.palette;
+        match block {
+            Block::Text(inline) => {
+                let (runs, links) = inline_runs(&inline, style, palette);
+                SelectableText::new(self.id(), inline.text, palette)
+                    .with_runs(runs)
+                    .with_links(links)
+                    .into_any_element()
+            }
+            Block::Rule => div()
+                .w_full()
+                .h(px(1.))
+                .my(px(6.))
+                .bg(palette.border_subtle)
+                .into_any_element(),
+            Block::Code(lang, text) => render_code_block(&self.id(), &lang, &text, palette),
+            Block::Group(kind, children) => match kind {
+                Kind::Root => div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(9.))
+                    .w_full()
+                    .min_w_0()
+                    .text_size(px(14.5))
+                    .line_height(px(23.))
+                    .children(children.into_iter().map(|b| self.block(b, style)))
+                    .into_any_element(),
+                Kind::Heading(level) => {
+                    let (size, height, family) = match level {
+                        HeadingLevel::H1 => (22., 30., font_display()),
+                        HeadingLevel::H2 => (19., 27., font_display()),
+                        HeadingLevel::H3 => (16.5, 24., font_display()),
+                        HeadingLevel::H4 => (15., 22., font_sans()),
+                        HeadingLevel::H5 => (14., 21., font_sans()),
+                        HeadingLevel::H6 => (13., 20., font_sans()),
                     };
-                }
-                Tag::List(start) => {
-                    if list_stack.is_empty() {
-                        flush_paragraph(
-                            &mut inline_text,
-                            &mut highlights,
-                            in_blockquote,
-                            &mut children,
-                        );
-                    } else if in_item && !inline_text.trim().is_empty() {
-                        let depth = list_stack.len().saturating_sub(1);
-                        let marker = match list_stack.last_mut() {
-                            Some(Some(num)) => {
-                                let m = format!("{num}.");
-                                *num += 1;
-                                m
-                            }
-                            _ => "•".to_string(),
-                        };
-                        list_items.push((
-                            depth,
-                            marker,
-                            std::mem::take(&mut inline_text),
-                            std::mem::take(&mut highlights),
-                        ));
-                        inline_text.clear();
-                    }
-                    list_stack.push(start);
-                }
-                Tag::Item => {
-                    in_item = true;
-                    inline_text.clear();
-                    highlights.clear();
-                }
-                Tag::Table(_) => {
-                    flush_paragraph(
-                        &mut inline_text,
-                        &mut highlights,
-                        in_blockquote,
-                        &mut children,
-                    );
-                    in_table = true;
-                    table_rows.clear();
-                }
-                Tag::TableHead | Tag::TableRow => {
-                    current_row.clear();
-                }
-                Tag::TableCell => {
-                    in_cell = true;
-                    cell_buf.clear();
-                }
-                Tag::Strong => {
-                    bold_start = Some(inline_text.len());
-                }
-                Tag::Emphasis => {
-                    italic_start = Some(inline_text.len());
-                }
-                Tag::Link { .. } => {
-                    link_start = Some(inline_text.len());
-                }
-                _ => {}
-            },
-            Event::End(tag_end) => match tag_end {
-                TagEnd::Heading(_) => {
-                    let level = heading_level.take().unwrap_or(HeadingLevel::H3);
-                    let txt = std::mem::take(&mut inline_text);
-                    highlights.clear();
-                    if !txt.trim().is_empty() {
-                        let (sz, lh, serif) = match level {
-                            HeadingLevel::H1 => (21.0, 29.0, true),
-                            HeadingLevel::H2 => (18.0, 26.0, true),
-                            HeadingLevel::H3 => (15.5, 23.0, false),
-                            _ => (14.5, 22.0, false),
-                        };
-                        children.push(
-                            div()
-                                .pt(px(6.0))
-                                .text_size(px(sz))
-                                .line_height(px(lh))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .font_family(if serif { font_serif() } else { font_sans() })
-                                .text_color(palette.text_primary)
-                                .child(txt.trim().to_string())
-                                .into_any_element(),
-                        );
-                    }
-                }
-                TagEnd::Paragraph => {
-                    if !in_item && !in_table {
-                        flush_paragraph(
-                            &mut inline_text,
-                            &mut highlights,
-                            in_blockquote,
-                            &mut children,
-                        );
-                    }
-                }
-                TagEnd::BlockQuote(_) => {
-                    flush_paragraph(&mut inline_text, &mut highlights, true, &mut children);
-                    in_blockquote = false;
-                }
-                TagEnd::CodeBlock => {
-                    in_code_block = false;
-                    block_idx += 1;
-                    let key = format!("{id_prefix}-cb-{block_idx}");
-                    children.push(render_code_block(
-                        &key,
-                        &code_lang,
-                        code_buf.trim_end_matches('\n'),
-                        palette,
-                    ));
-                    code_buf.clear();
-                    code_lang.clear();
-                }
-                TagEnd::Item => {
-                    if !inline_text.trim().is_empty() {
-                        let depth = list_stack.len().saturating_sub(1);
-                        let marker = match list_stack.last_mut() {
-                            Some(Some(num)) => {
-                                let m = format!("{num}.");
-                                *num += 1;
-                                m
-                            }
-                            _ => "•".to_string(),
-                        };
-                        list_items.push((
-                            depth,
-                            marker,
-                            std::mem::take(&mut inline_text),
-                            std::mem::take(&mut highlights),
-                        ));
-                    }
-                    inline_text.clear();
-                    highlights.clear();
-                    in_item = false;
-                }
-                TagEnd::List(_) => {
-                    list_stack.pop();
-                    if list_stack.is_empty() && !list_items.is_empty() {
-                        let mut list_div = div().flex().flex_col().gap(px(4.0));
-                        for (depth, marker, text, spans) in list_items.drain(..) {
-                            let runs = inline_highlights(&text, spans);
-                            list_div = list_div.child(
-                                div()
-                                    .flex()
-                                    .gap(px(5.0))
-                                    .pl(px((depth as f32) * 16.0 + 4.0))
-                                    .text_size(px(14.5))
-                                    .line_height(px(22.0))
-                                    .text_color(palette.text_primary)
-                                    .font_family(font_sans())
-                                    .child(marker)
-                                    .child(
-                                        StyledText::new(SharedString::from(
-                                            text.trim_end().to_owned(),
-                                        ))
-                                        .with_highlights(runs),
-                                    ),
-                            );
-                        }
-                        children.push(list_div.into_any_element());
-                    }
-                }
-                TagEnd::TableCell => {
-                    in_cell = false;
-                    current_row.push(cell_buf.trim().to_string());
-                    cell_buf.clear();
-                }
-                TagEnd::TableHead | TagEnd::TableRow => {
-                    if !current_row.is_empty() {
-                        table_rows.push(std::mem::take(&mut current_row));
-                    }
-                }
-                TagEnd::Table => {
-                    in_table = false;
-                    if !table_rows.is_empty() {
-                        children.push(render_table(&table_rows, palette));
-                        table_rows.clear();
-                    }
-                }
-                TagEnd::Strong => {
-                    if let Some(start) = bold_start.take()
-                        && start < inline_text.len()
-                    {
-                        highlights.push((
-                            start..inline_text.len(),
-                            HighlightStyle {
-                                font_weight: Some(FontWeight::SEMIBOLD),
-                                ..Default::default()
-                            },
-                        ));
-                    }
-                }
-                TagEnd::Emphasis => {
-                    if let Some(start) = italic_start.take()
-                        && start < inline_text.len()
-                    {
-                        highlights.push((
-                            start..inline_text.len(),
-                            HighlightStyle {
-                                font_style: Some(FontStyle::Italic),
-                                ..Default::default()
-                            },
-                        ));
-                    }
-                }
-                TagEnd::Link => {
-                    if let Some(start) = link_start.take()
-                        && start < inline_text.len()
-                    {
-                        highlights.push((
-                            start..inline_text.len(),
-                            HighlightStyle {
-                                color: Some(palette.info),
-                                underline: Some(UnderlineStyle {
-                                    color: Some(palette.info),
-                                    thickness: px(1.0),
-                                    wavy: false,
-                                }),
-                                ..Default::default()
-                            },
-                        ));
-                    }
-                }
-                _ => {}
-            },
-            Event::Text(text) => {
-                if in_code_block {
-                    code_buf.push_str(&text);
-                } else if in_cell {
-                    cell_buf.push_str(&text);
-                } else {
-                    inline_text.push_str(&text);
-                }
-            }
-            Event::Code(code) => {
-                if in_cell {
-                    cell_buf.push('`');
-                    cell_buf.push_str(&code);
-                    cell_buf.push('`');
-                } else {
-                    let start = inline_text.len();
-                    inline_text.push_str(&code);
-                    let end = inline_text.len();
-                    highlights.push((
-                        start..end,
-                        HighlightStyle {
-                            color: Some(palette.accent),
-                            background_color: Some(palette.bg_code),
-                            font_weight: Some(FontWeight::MEDIUM),
-                            ..Default::default()
-                        },
-                    ));
-                }
-            }
-            Event::SoftBreak => {
-                if in_code_block {
-                    code_buf.push('\n');
-                } else if !in_cell {
-                    inline_text.push(' ');
-                }
-            }
-            Event::HardBreak => {
-                if in_code_block {
-                    code_buf.push('\n');
-                } else if !in_cell {
-                    inline_text.push('\n');
-                }
-            }
-            Event::Rule => {
-                flush_paragraph(
-                    &mut inline_text,
-                    &mut highlights,
-                    in_blockquote,
-                    &mut children,
-                );
-                children.push(
+                    let heading = TypeStyle {
+                        family,
+                        weight: FontWeight::SEMIBOLD,
+                        ink: style.ink,
+                    };
                     div()
-                        .w_full()
-                        .h(px(1.0))
-                        .my(px(6.0))
-                        .bg(palette.border_subtle)
-                        .into_any_element(),
-                );
-            }
-            _ => {}
+                        .min_w_0()
+                        .pt(px(5.))
+                        .text_size(px(size))
+                        .line_height(px(height))
+                        .children(children.into_iter().map(|b| self.block(b, &heading)))
+                        .into_any_element()
+                }
+                Kind::Quote(alert) => self.quote(alert, children, style),
+                Kind::List(start) => {
+                    let rows = children.into_iter().enumerate().map(|(i, child)| {
+                        let marker = start.map_or_else(
+                            || "•".to_owned(),
+                            |n| format!("{}.", n.saturating_add(i as u64)),
+                        );
+                        div()
+                            .flex()
+                            .w_full()
+                            .min_w_0()
+                            .gap(px(7.))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_color(palette.text_secondary)
+                                    .child(marker),
+                            )
+                            .child(div().flex_1().min_w_0().child(self.block(child, style)))
+                    });
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(5.))
+                        .min_w_0()
+                        .children(rows)
+                        .into_any_element()
+                }
+                Kind::Table(align) => self.table(&align, children, style),
+                Kind::Item | Kind::Paragraph | Kind::Cell | Kind::Row => div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(5.))
+                    .min_w_0()
+                    .children(children.into_iter().map(|b| self.block(b, style)))
+                    .into_any_element(),
+                Kind::Code(_) => unreachable!("code frames finish as leaf blocks"),
+            },
         }
     }
 
-    flush_paragraph(
-        &mut inline_text,
-        &mut highlights,
-        in_blockquote,
-        &mut children,
-    );
+    fn quote(
+        &mut self,
+        kind: Option<BlockQuoteKind>,
+        children: Vec<Block>,
+        style: &TypeStyle,
+    ) -> AnyElement {
+        let p = self.palette;
+        let (ink, icon, title) = match kind {
+            None => (p.border_strong, Icon::MessageSquare, ""),
+            Some(BlockQuoteKind::Note) => (p.info, Icon::MessageSquare, "Note"),
+            Some(BlockQuoteKind::Tip) => (p.success, Icon::Sparkles, "Tip"),
+            Some(BlockQuoteKind::Important) => (p.accent, Icon::Zap, "Important"),
+            Some(BlockQuoteKind::Warning) => (p.warning, Icon::Shield, "Warning"),
+            Some(BlockQuoteKind::Caution) => (p.danger, Icon::Shield, "Caution"),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .min_w_0()
+            .pl(px(12.))
+            .py(px(5.))
+            .border_l_2()
+            .border_color(ink)
+            .bg(p.bg_hover)
+            .rounded_r_md()
+            .when(kind.is_some(), |d| {
+                d.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(ink)
+                        .child(icon.render(14., ink))
+                        .child(title),
+                )
+            })
+            .children(children.into_iter().map(|b| self.block(b, style)))
+            .into_any_element()
+    }
 
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(9.0))
-        .w_full()
-        .children(children)
-        .into_any_element()
+    fn table(&mut self, align: &[Alignment], rows: Vec<Block>, style: &TypeStyle) -> AnyElement {
+        let p = self.palette;
+        let id = self.id();
+        let mut table = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .min_w(px(108. * align.len() as f32))
+            .rounded_md()
+            .border_1()
+            .border_color(p.border_subtle);
+        for (index, row) in rows.into_iter().enumerate() {
+            let Block::Group(Kind::Row, cells) = row else {
+                continue;
+            };
+            let mut cells = cells.into_iter();
+            let header = index == 0;
+            let face = TypeStyle {
+                weight: if header {
+                    FontWeight::SEMIBOLD
+                } else {
+                    style.weight
+                },
+                ink: if header {
+                    p.text_primary
+                } else {
+                    p.text_secondary
+                },
+                family: style.family.clone(),
+            };
+            let row = div()
+                .flex()
+                .w_full()
+                .px(px(10.))
+                .py(px(6.))
+                .gap(px(12.))
+                .when(header, |d| d.bg(p.bg_elevated))
+                .when(!header, |d| d.border_t_1().border_color(p.border_subtle))
+                .children(align.iter().map(|alignment| {
+                    let align = match alignment {
+                        Alignment::None | Alignment::Left => TextAlign::Left,
+                        Alignment::Center => TextAlign::Center,
+                        Alignment::Right => TextAlign::Right,
+                    };
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(13.))
+                        .text_align(align)
+                        .children(cells.next().map(|b| self.block(b, &face)))
+                }));
+            table = table.child(row);
+        }
+        div()
+            .id(SharedString::from(id))
+            .w_full()
+            .min_w_0()
+            .overflow_x_scroll()
+            .child(table)
+            .into_any_element()
+    }
 }
 
-/// Render a recessed monospace code block with language badge, Copy button, and syntax tinting.
+/// Render a selectable code pane. Expansion and copy always operate on the same source.
 #[must_use]
 pub fn render_code_block(id: &str, lang: &str, code: &str, palette: Palette) -> AnyElement {
-    let copy_payload = code.to_string();
-    let label = if lang.is_empty() { "code" } else { lang };
-
-    let lines: Vec<AnyElement> = code
-        .lines()
-        .take(160)
-        .map(|line| render_tinted_code_line(line, lang, palette))
-        .collect();
-    let total_lines = code.lines().count();
-
+    let text: SharedString = code.to_owned().into();
+    let language: SharedString = lang.to_owned().into();
+    let content_id = format!("{id}-source");
+    let scroll_id: SharedString = format!("{id}-scroll").into();
     div()
         .w_full()
+        .min_w_0()
         .rounded_lg()
         .border_1()
         .border_color(palette.border_subtle)
@@ -471,182 +353,43 @@ pub fn render_code_block(id: &str, lang: &str, code: &str, palette: Palette) -> 
                 .flex()
                 .items_center()
                 .justify_between()
-                .px(px(12.0))
-                .py(px(5.0))
+                .px(px(12.))
+                .py(px(5.))
                 .border_b_1()
                 .border_color(palette.border_subtle)
                 .bg(palette.bg_elevated)
                 .child(
                     div()
+                        .min_w_0()
+                        .truncate()
                         .text_size(px(11.5))
                         .font_family(font_mono())
-                        .text_color(palette.text_muted)
-                        .child(label.to_string()),
+                        .text_color(palette.text_secondary)
+                        .child(if lang.is_empty() {
+                            "code".into()
+                        } else {
+                            language.clone()
+                        }),
                 )
-                .child(
-                    div()
-                        .id(SharedString::from(format!("{id}-copy")))
-                        .flex()
-                        .items_center()
-                        .gap(px(4.0))
-                        .px(px(7.0))
-                        .py(px(2.0))
-                        .rounded_sm()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(palette.bg_hover))
-                        .on_click(move |_, _, cx| {
-                            cx.write_to_clipboard(ClipboardItem::new_string(copy_payload.clone()));
-                        })
-                        .child(Icon::Copy.render(12.0, palette.text_secondary))
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(palette.text_secondary)
-                                .child("Copy"),
-                        ),
-                ),
+                .child(copy_button(format!("{id}-copy"), text.clone(), palette)),
         )
-        .child(
-            div()
-                .id(SharedString::from(format!("{id}-scroll")))
-                .p(px(12.0))
-                .overflow_x_scroll()
-                .font_family(font_mono())
+        .child(limited_lines(
+            format!("{id}-lines"),
+            text,
+            160,
+            palette,
+            move |visible| {
+                let runs = syntax::highlight(&language, visible, palette);
+                horizontal_scroll(
+                    scroll_id,
+                    SelectableText::new(content_id, visible.to_owned(), palette).with_runs(runs),
+                )
+                .p(px(12.))
                 .text_size(px(12.5))
-                .line_height(px(19.0))
-                .flex()
-                .flex_col()
-                .children(lines)
-                .when(total_lines > 160, |d| {
-                    d.child(
-                        div()
-                            .pt(px(6.0))
-                            .text_size(px(11.5))
-                            .text_color(palette.text_muted)
-                            .child(format!(
-                                "… {} more lines (click Copy for full block)",
-                                total_lines - 160
-                            )),
-                    )
-                }),
-        )
+                .line_height(px(19.))
+                .font_family(font_mono())
+                .into_any_element()
+            },
+        ))
         .into_any_element()
-}
-
-fn render_tinted_code_line(line: &str, lang: &str, palette: Palette) -> AnyElement {
-    let trimmed = line.trim_start();
-    let color = if trimmed.starts_with('#') || trimmed.starts_with("//") {
-        palette.text_muted
-    } else if lang == "diff" && line.starts_with('+') {
-        palette.success
-    } else if lang == "diff" && line.starts_with('-') {
-        palette.danger
-    } else if [
-        "def ",
-        "async def ",
-        "class ",
-        "import ",
-        "from ",
-        "return ",
-        "await ",
-        "fn ",
-        "pub ",
-        "let ",
-        "impl ",
-        "struct ",
-        "enum ",
-        "use ",
-    ]
-    .iter()
-    .any(|kw| trimmed.starts_with(kw))
-    {
-        palette.accent
-    } else {
-        palette.text_primary
-    };
-
-    div()
-        .whitespace_nowrap()
-        .text_color(color)
-        .child(if line.is_empty() {
-            " ".to_string()
-        } else {
-            line.to_string()
-        })
-        .into_any_element()
-}
-
-fn render_table(rows: &[Vec<String>], palette: Palette) -> AnyElement {
-    let mut table = div()
-        .w_full()
-        .rounded_md()
-        .border_1()
-        .border_color(palette.border_subtle)
-        .overflow_hidden()
-        .flex()
-        .flex_col();
-
-    for (r_idx, row) in rows.iter().enumerate() {
-        let is_header = r_idx == 0;
-        let mut row_div = div()
-            .flex()
-            .w_full()
-            .px(px(10.0))
-            .py(px(6.0))
-            .gap(px(12.0))
-            .when(is_header, |d| d.bg(palette.bg_elevated))
-            .when(r_idx > 0, |d| {
-                d.border_t_1().border_color(palette.border_subtle)
-            });
-        for cell in row {
-            row_div = row_div.child(
-                div()
-                    .flex_1()
-                    .text_size(px(12.5))
-                    .font_weight(if is_header {
-                        FontWeight::SEMIBOLD
-                    } else {
-                        FontWeight::NORMAL
-                    })
-                    .text_color(if is_header {
-                        palette.text_primary
-                    } else {
-                        palette.text_secondary
-                    })
-                    .child(cell.clone()),
-            );
-        }
-        table = table.child(row_div);
-    }
-
-    table.into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn nested_markdown_styles_partition_unicode_text_without_overlapping_runs() {
-        let source = "鳥abc猫 ";
-        let bold = HighlightStyle {
-            font_weight: Some(FontWeight::SEMIBOLD),
-            ..Default::default()
-        };
-        let italic = HighlightStyle {
-            font_style: Some(FontStyle::Italic),
-            ..Default::default()
-        };
-        let runs = inline_highlights(source, vec![(3..6, italic), (0..source.len(), bold)])
-            .map(|(r, st)| (&source[r], st.font_style, st.font_weight))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            runs,
-            [
-                ("鳥", None, bold.font_weight),
-                ("abc", italic.font_style, bold.font_weight),
-                ("猫", None, bold.font_weight)
-            ]
-        );
-    }
 }

@@ -283,21 +283,19 @@ fn desktop_bridge_supervises_session_bash_catalog_and_harness_store() {
                 BridgeEvent::SessionEvent {
                     active_session_id,
                     event,
-                } => {
-                    if attached_sid.as_deref() == Some(active_session_id.as_str()) {
-                        session_state.apply_live_event(&event);
-                        if session_state.entries.iter().any(|e| {
-                            matches!(
-                                e,
-                                TranscriptEntry::UserBash {
-                                    running: false,
-                                    output,
-                                    ..
-                                } if output.contains("gpui-bridge-ok")
-                            )
-                        }) {
-                            saw_bash_done = true;
-                        }
+                } if attached_sid.as_deref() == Some(active_session_id.as_str()) => {
+                    session_state.apply_live_event(&event);
+                    if session_state.entries.iter().any(|e| {
+                        matches!(
+                            e,
+                            TranscriptEntry::UserBash {
+                                running: false,
+                                output,
+                                ..
+                            } if output.contains("gpui-bridge-ok")
+                        )
+                    }) {
+                        saw_bash_done = true;
                     }
                 }
                 _ => {}

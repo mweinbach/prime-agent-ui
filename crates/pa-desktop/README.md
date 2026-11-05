@@ -16,6 +16,8 @@ open "dist/Prime Agent.app"
 
 To run from the checkout without packaging the app, use `make run-desktop`. Both binaries share `target/`. The development launcher points the daemon at `harness/` for its Python runtime and built-in skills. The app bundle carries its own copies and does not need the checkout.
 
+The desktop embeds Google Sans for prose, Google Sans Code for code and telemetry, and Google Sans Flex for headings. All three families use the [SIL Open Font License](FONT-LICENSE).
+
 ## Projects and chats
 
 Use the folder-plus button (`⇧⌘O`) to add a project. It opens that folder’s composer without creating a CLI session. Your added folders and the current working folder appear first. Other directories from the CLI sit under **Folder history**. Hover over a folder and click the pin to keep it with your projects without leaving your conversation. Unpinning never deletes files or chats.

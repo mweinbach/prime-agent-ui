@@ -236,6 +236,10 @@ pub struct Palette {
     pub accent_hover: Hsla,
     /// Soft translucent terracotta wash for badges/pills.
     pub accent_soft: Hsla,
+    /// Highlight behind selected text in the focused control.
+    pub selection_bg: Hsla,
+    /// Preserve the selection context when focus moves elsewhere.
+    pub selection_bg_inactive: Hsla,
 
     /// Sage green (healthy daemon, completed/live agent, added diff lines).
     pub success: Hsla,
@@ -278,6 +282,8 @@ impl Palette {
                 accent: rgb(0x00E0_A289).into(),
                 accent_hover: rgb(0x00F0_B298).into(),
                 accent_soft: rgba(0xD977_5726).into(),
+                selection_bg: rgba(0xE0A2_8948).into(),
+                selection_bg_inactive: rgba(0xE0A2_8924).into(),
 
                 success: rgb(0x006B_A87C).into(),
                 success_soft: rgba(0x6BA8_7C24).into(),
@@ -311,6 +317,8 @@ impl Palette {
                 accent: rgb(0x009F_5037).into(),
                 accent_hover: rgb(0x0084_3F2A).into(),
                 accent_soft: rgba(0xC964_421E).into(),
+                selection_bg: rgba(0xC964_4236).into(),
+                selection_bg_inactive: rgba(0xC964_421C).into(),
 
                 success: rgb(0x002F_7D47).into(),
                 success_soft: rgba(0x2F7D_471C).into(),
@@ -325,20 +333,26 @@ impl Palette {
     }
 }
 
-/// Serif for conversation headings.
+/// Display face for conversation headings.
 #[must_use]
-pub fn font_serif() -> SharedString {
-    SharedString::new_static("Georgia")
+pub fn font_display() -> SharedString {
+    SharedString::new_static("Google Sans Flex")
 }
 
-/// Native UI sans font family.
+/// Historical name for the conversation heading face.
+#[must_use]
+pub fn font_serif() -> SharedString {
+    font_display()
+}
+
+/// UI and conversation body font.
 #[must_use]
 pub fn font_sans() -> SharedString {
-    SharedString::new_static(".SystemUIFont")
+    SharedString::new_static("Google Sans")
 }
 
 /// Crisp monospace font family for Python REPL cells, bash output, diffs, and IDs.
 #[must_use]
 pub fn font_mono() -> SharedString {
-    SharedString::new_static("Menlo")
+    SharedString::new_static("Google Sans Code")
 }

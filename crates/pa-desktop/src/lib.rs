@@ -23,7 +23,7 @@ use gpui::{
     WindowOptions, point, prelude::*, px, size,
 };
 
-use crate::assets::EmbeddedAssets;
+use crate::assets::{EmbeddedAssets, register_embedded_fonts};
 use crate::ui::text_input::bind_text_input_keys;
 use crate::ui::workspace::{
     LaunchOptions, PrimeDesktopView, register_workspace_bindings_and_menus,
@@ -38,6 +38,7 @@ pub fn run_desktop_app(options: LaunchOptions) {
     Application::new()
         .with_assets(EmbeddedAssets)
         .run(move |cx: &mut App| {
+            register_embedded_fonts(cx);
             bind_text_input_keys(cx);
             register_workspace_bindings_and_menus(cx);
 

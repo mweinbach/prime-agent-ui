@@ -63,12 +63,12 @@ impl PrimeDesktopView {
         self.set_sidebar_scope(Some(cwd.to_owned()), cx);
     }
 
-    pub(crate) fn reveal_current_project(&mut self, cx: &mut Context<Self>) {
+    pub(crate) fn reveal_current_project(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.current_project().is_empty() {
             return;
         }
         if !self.prefs.sidebar_open {
-            self.toggle_sidebar(cx);
+            self.toggle_sidebar(window, cx);
         }
         let folder = self.current_project().to_owned();
         self.focus_sidebar_project(&folder, cx);
@@ -159,7 +159,7 @@ fn titlebar(scoped: bool, p: Palette, cx: &mut Context<PrimeDesktopView>) -> imp
         })
         .child(
             icon_button("sidebar-collapse-btn", Icon::Sidebar, "Hide sidebar", p)
-                .on_click(cx.listener(|view, _, _, cx| view.toggle_sidebar(cx))),
+                .on_click(cx.listener(|view, _, window, cx| view.toggle_sidebar(window, cx))),
         )
 }
 
