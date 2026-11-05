@@ -179,4 +179,55 @@ mod tests {
         assert_eq!(handle.offset().y, -handle.max_offset().height);
         app.quit();
     }
+
+    #[test]
+    fn composer_wraps_and_stays_docked_when_the_stage_clamps_its_width() {
+        let profile = TempDir::new().unwrap();
+        let mut app = TestAppContext::single();
+        app.dispatcher.allow_parking();
+        let (view, cx) = app.add_window_view(|window, cx| {
+            PrimeDesktopView::new(
+                LaunchOptions {
+                    daemon_socket: Some(profile.path().join("offline.sock")),
+                    initial_cwd: Some(profile.path().into()),
+                    ..Default::default()
+                },
+                profile.path().into(),
+                window,
+                cx,
+            )
+        });
+        cx.executor()
+            .block_test(cx.condition(&view, |view, _| view.toast.is_some()));
+        view.update_in(cx, |view, _, cx| {
+            view.toast = None;
+            view.prefs.reduce_motion = true;
+            view.selection = SessionSelection::WaitingFor("history".into());
+            view.apply_bridge_event(
+                BridgeEvent::SessionAttached {
+                    active_session_id: "history".into(),
+                    snapshot: json!({"messages": [{"role": "user", "content": "Review this"}]}),
+                },
+                cx,
+            );
+            view.composer_input.update(cx, |input, cx| {
+                input.set_text("fix all of this, commit, and add tests. ".repeat(4), cx);
+            });
+        });
+        // The wide window caps the composer at its 720px column.
+        for width in [px(1370.), px(900.)] {
+            cx.simulate_resize(gpui::size(width, px(850.)));
+            cx.update(|window, cx| window.draw(cx).clear());
+            let field = cx.debug_bounds("composer-input").unwrap();
+            let (canvas, rows) =
+                view.read_with(cx, |view, cx| view.composer_input.read(cx).painted_rows());
+            assert_eq!(canvas.unwrap().size.width, field.size.width);
+            assert!(rows.len() > 1, "{width:?}: {rows:?}");
+            assert!(rows.iter().all(|row| *row <= field.size.width));
+            let stage = cx.debug_bounds("workspace-stage").unwrap();
+            let card = cx.debug_bounds("composer-card").unwrap();
+            assert_eq!(card.bottom(), stage.bottom() - px(20.0), "{width:?}");
+        }
+        app.quit();
+    }
 }

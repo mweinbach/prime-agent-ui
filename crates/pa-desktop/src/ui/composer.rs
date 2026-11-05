@@ -147,6 +147,7 @@ pub fn render_composer(
                 // Main Floating Composer Card
                 .child(
                     div()
+                        .debug_selector(|| "composer-card".to_owned())
                         .w_full()
                         .rounded_2xl()
                         .border_1()
