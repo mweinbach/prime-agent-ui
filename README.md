@@ -4,6 +4,10 @@ An unofficial desktop client for [Prime Agent](https://github.com/PrimeIntellect
 
 ## Download or build
 
+[Download the latest Apple Silicon Mac app](https://github.com/mweinbach/prime-agent-ui/releases/latest/download/prime-agent-ui-macos-arm64.zip). Unzip it, quit any running copy, and move **Prime Agent.app** into **Applications**.
+
+Beginning with the first update-enabled release (0.10.3), use **Prime Agent → Check for Updates…** or allow Sparkle to check periodically. Users coming from 0.10.2 need to install the new app manually once. The stable [Sparkle appcast](https://github.com/mweinbach/prime-agent-ui/releases/latest/download/appcast.xml) becomes available when the first signed feed is published.
+
 [Tagged releases](https://github.com/mweinbach/prime-agent-ui/releases) are published only when all four platform builds pass. Each archive includes the desktop app, the CLI daemon it was built with, the Python runtime source, and the built-in skills. Extract the whole archive before launching.
 
 | Platform | Archive | Launch |
@@ -67,3 +71,15 @@ git commit -m "Update the pinned Prime Agent harness"
 If a dependency change makes the desktop lockfile stale, run `cargo tree -p pa-desktop` to update it, review `Cargo.lock`, and include it with the pin. Push changes to the harness fork **before** publishing a desktop pin that references them. See [Contributing](CONTRIBUTING.md) for making harness changes and bringing upstream fixes into the fork.
 
 **Licenses:** [Prime Agent](LICENSE) · [Desktop icons](crates/pa-desktop/ICON-LICENSE) · [Desktop fonts](crates/pa-desktop/FONT-LICENSE) · [Harness and export assets](harness/crates/pa-core/assets/export-html/NOTICE.md).
+
+### Maintaining the macOS update feed
+
+Before the first signed release, run this on a maintainer Mac with the GitHub CLI signed in and repository Actions secret/variable write access. Start from an up-to-date checkout of `main`:
+
+```sh
+./scripts/setup_sparkle.sh --publish
+```
+
+This creates or reuses the app-specific Ed25519 identity in your login Keychain, sets the `SPARKLE_PUBLIC_ED_KEY` Actions variable and `SPARKLE_PRIVATE_ED_KEY` Actions secret, and pushes the stable tag for the checked-out desktop version. Omit `--publish` to enroll without tagging. To reuse an existing Sparkle Keychain identity, set `SPARKLE_KEY_ACCOUNT` to its account name. Back up the key securely. Installed copies trust this identity across releases.
+
+Subsequent stable tags publish the signed `appcast.xml` alongside the four tested archives. The release job verifies the signature against the public key embedded in the archived app. Preview releases stay off the stable feed. Developer builds without a signing configuration skip update checks. To build an update-enabled app locally, run `scripts/fetch_sparkle.sh "$PWD/target/sparkle"`, export that path as `SPARKLE_SDK` and export the enrolled public key as `SPARKLE_PUBLIC_ED_KEY` before running `make desktop-app`.

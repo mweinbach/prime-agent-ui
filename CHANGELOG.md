@@ -1,5 +1,9 @@
 # Desktop changes
 
+## 0.10.3
+
+- Apple Silicon Mac releases support signed Sparkle updates through the Prime Agent menu. Install this version manually once when upgrading from 0.10.2.
+
 ## 0.10.2
 
 - Select and copy transcript text, follow Markdown links, and expand syntax-highlighted code, diffs, and terminal output.

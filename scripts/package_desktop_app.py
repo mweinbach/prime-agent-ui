@@ -5,15 +5,17 @@ Follows strict macOS bundle sealing order:
 1. Binaries (`prime-agent-ui`, `prime-agent`) placed under `Contents/MacOS/`.
 2. Resources (`AppIcon.icns`, `prime-agent-runtime/`, `skills/`, licenses) placed under
    `Contents/Resources/` BEFORE signing; no root symlinks, no user credentials.
-3. Ad-hoc signed with `codesign --force --deep --sign -` and verified with
+3. Ad-hoc signed after sealing embedded code and verified with
    `codesign --verify --deep --strict`.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import io
 import math
+import os
 import plistlib
 import shutil
 import stat
@@ -231,6 +233,32 @@ def verify_app(app_dir: Path) -> None:
     )
 
 
+SPARKLE_FEED_URL = "https://github.com/mweinbach/prime-agent-ui/releases/latest/download/appcast.xml"
+
+
+def stage_updater(contents: Path, sdk: Path, public_key: str) -> dict:
+    binary = contents / "MacOS" / "prime-agent-ui"
+    linked = subprocess.check_output(["otool", "-L", binary], text=True)
+    if "@rpath/Sparkle.framework/" not in linked:
+        raise ValueError("Rebuild prime-agent-ui with SPARKLE_SDK before packaging.")
+    framework = contents / "Frameworks" / "Sparkle.framework"
+    framework.parent.mkdir()
+    subprocess.run(["ditto", sdk / "Sparkle.framework", framework], check=True)
+    # Preserve upstream signatures and entitlements on the framework, XPCs and installer.
+    subprocess.run(["codesign", "--verify", "--deep", "--strict", framework], check=True)
+    shutil.copyfile(sdk / "LICENSE", contents / "Resources/licenses/desktop/Sparkle-LICENSE")
+    if not public_key:
+        return {}  # Unconfigured developer builds never poll the production feed.
+    if len(base64.b64decode(public_key, validate=True)) != 32:
+        raise ValueError("SPARKLE_PUBLIC_ED_KEY must encode a 32-byte Ed25519 public key.")
+    return {
+        "SUFeedURL": SPARKLE_FEED_URL,
+        "SUPublicEDKey": public_key,
+        "SURequireSignedFeed": True,
+        "SUVerifyUpdateBeforeExtraction": True,
+    }
+
+
 def package_app(
     repo_root: Path, out_root: Path, binaries: tuple[Path, Path], harness_ref: str = "HEAD"
 ) -> Path:
@@ -260,12 +288,22 @@ def package_app(
         "NSHighResolutionCapable": True,
         "NSSupportsAutomaticGraphicsSwitching": True,
     }
+    sdk = os.environ.get("SPARKLE_SDK")
+    public_key = os.environ.get("SPARKLE_PUBLIC_ED_KEY", "").strip()
+    if sdk:
+        info.update(stage_updater(contents, Path(sdk), public_key))
+    elif public_key or "@rpath/Sparkle.framework/" in subprocess.check_output(
+        ["otool", "-L", contents / "MacOS/prime-agent-ui"], text=True
+    ):
+        raise ValueError("Set SPARKLE_SDK to package the update-enabled binary.")
+
     with (contents / "Info.plist").open("wb") as fp:
         plistlib.dump(info, fp)
 
     # 3. Sign after resource assembly and run strict verification
+    subprocess.run(["codesign", "--force", "--sign", "-", contents / "MacOS/prime-agent"], check=True)
     subprocess.run(
-        ["codesign", "--force", "--deep", "--sign", "-", str(app_dir)],
+        ["codesign", "--force", "--sign", "-", str(app_dir)],
         check=True,
     )
     verify_app(app_dir)
