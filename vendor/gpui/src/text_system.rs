@@ -43,12 +43,40 @@ pub struct FontFamilyId(pub usize);
 
 pub(crate) const SUBPIXEL_VARIANTS_X: u8 = 4;
 
-pub(crate) const SUBPIXEL_VARIANTS_Y: u8 =
-    if cfg!(target_os = "windows") || cfg!(target_os = "linux") {
-        1
-    } else {
-        SUBPIXEL_VARIANTS_X
-    };
+// Baselines snap to whole device pixels on every platform, matching AppKit. Vertical
+// subpixel variants made each line's sharpness depend on its fractional y offset.
+pub(crate) const SUBPIXEL_VARIANTS_Y: u8 = 1;
+
+/// CoreGraphics picks one of five font-smoothing (stroke dilation) levels from the
+/// foreground color's luminance: dark text gets the least, light text the most.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn glyph_dilation_for_luminance(color: Hsla) -> u8 {
+    let rgba: crate::Rgba = color.into();
+    let luminance = 0.2126 * rgba.r + 0.7152 * rgba.g + 0.0722 * rgba.b;
+    let level = ((4.0 * luminance) + 0.5).floor() as i32;
+    level.clamp(0, 4) as u8
+}
+
+/// Splits a device-space glyph origin into a whole-pixel origin and a subpixel variant,
+/// snapping to the nearest step (a quarter pixel horizontally, a whole pixel vertically)
+/// rather than always rounding down, which biased every glyph up and to the left.
+pub(crate) fn quantize_glyph_origin(
+    origin: Point<crate::ScaledPixels>,
+) -> (Point<crate::ScaledPixels>, Point<u8>) {
+    fn quantize(value: f32, variants: u8) -> (f32, u8) {
+        let steps = f32::from(variants);
+        let snapped = (value * steps).round() / steps;
+        let whole = snapped.floor();
+        let variant = ((snapped - whole) * steps).round() as u8;
+        (whole, variant.min(variants - 1))
+    }
+    let (x, variant_x) = quantize(origin.x.0, SUBPIXEL_VARIANTS_X);
+    let (y, variant_y) = quantize(origin.y.0, SUBPIXEL_VARIANTS_Y);
+    (
+        Point::new(crate::ScaledPixels(x), crate::ScaledPixels(y)),
+        Point::new(variant_x, variant_y),
+    )
+}
 
 /// The GPUI text rendering sub system.
 pub struct TextSystem {
@@ -325,6 +353,11 @@ impl TextSystem {
         let raster_bounds = self.raster_bounds(params)?;
         self.platform_text_system
             .rasterize_glyph(params, raster_bounds)
+    }
+
+    /// Returns the dilation level to use for a glyph painted in the given color.
+    pub(crate) fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
+        self.platform_text_system.glyph_dilation_for_color(color)
     }
 }
 
@@ -767,6 +800,8 @@ pub(crate) struct RenderGlyphParams {
     pub(crate) subpixel_variant: Point<u8>,
     pub(crate) scale_factor: f32,
     pub(crate) is_emoji: bool,
+    /// CoreGraphics font-smoothing level (0 = none, 1..=4 by foreground luminance).
+    pub(crate) dilation: u8,
 }
 
 impl Eq for RenderGlyphParams {}
@@ -779,6 +814,7 @@ impl Hash for RenderGlyphParams {
         self.subpixel_variant.hash(state);
         self.scale_factor.to_bits().hash(state);
         self.is_emoji.hash(state);
+        self.dilation.hash(state);
     }
 }
 
@@ -914,5 +950,50 @@ pub(crate) fn font_name_with_fallbacks<'a>(name: &'a str, system: &'a str) -> &'
         ".ZedSans" | "Zed Plex Sans" => "IBM Plex Sans",
         ".ZedMono" | "Zed Plex Mono" => "Lilex",
         _ => name,
+    }
+}
+
+#[cfg(test)]
+mod glyph_raster_tests {
+    use super::*;
+    use crate::{ScaledPixels, black, hsla, point, white};
+
+    #[test]
+    fn dilation_follows_foreground_luminance_like_coregraphics() {
+        assert_eq!(glyph_dilation_for_luminance(black()), 0);
+        assert_eq!(glyph_dilation_for_luminance(white()), 4);
+        // Mid gray (sRGB 0.5) sits on the boundary between levels 2 and 3.
+        assert_eq!(glyph_dilation_for_luminance(hsla(0., 0., 0.4, 1.)), 2);
+        // Light text on a dark theme gets heavier smoothing than dark text on a light one.
+        assert!(
+            glyph_dilation_for_luminance(hsla(0., 0., 0.9, 1.))
+                > glyph_dilation_for_luminance(hsla(0., 0., 0.15, 1.))
+        );
+    }
+
+    #[test]
+    fn glyph_origins_snap_to_whole_pixel_baselines() {
+        let (origin, variant) =
+            quantize_glyph_origin(point(ScaledPixels(10.0), ScaledPixels(20.6)));
+        assert_eq!(origin, point(ScaledPixels(10.0), ScaledPixels(21.0)));
+        assert_eq!(variant, point(0, 0));
+
+        let (origin, variant) =
+            quantize_glyph_origin(point(ScaledPixels(10.3), ScaledPixels(20.4)));
+        assert_eq!(origin, point(ScaledPixels(10.0), ScaledPixels(20.0)));
+        assert_eq!(variant, point(1, 0));
+    }
+
+    #[test]
+    fn glyph_origins_round_to_nearest_quarter_pixel() {
+        // 10.9 is closer to 11.0 than to 10.75, so it must not be floored into variant 3.
+        let (origin, variant) = quantize_glyph_origin(point(ScaledPixels(10.9), ScaledPixels(0.0)));
+        assert_eq!(origin.x, ScaledPixels(11.0));
+        assert_eq!(variant.x, 0);
+
+        let (origin, variant) =
+            quantize_glyph_origin(point(ScaledPixels(-0.3), ScaledPixels(-0.4)));
+        assert_eq!(origin, point(ScaledPixels(-1.0), ScaledPixels(0.0)));
+        assert_eq!(variant, point(3, 0));
     }
 }

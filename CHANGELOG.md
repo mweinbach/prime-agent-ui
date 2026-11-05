@@ -3,6 +3,7 @@
 ## 0.10.3
 
 - Apple Silicon Mac releases support signed Sparkle updates through the Prime Agent menu. Install this version manually once when upgrading from 0.10.2.
+- Text on macOS now matches native apps. It uses the system font smoothing setting, keeps antialiased edges intact, and sits on whole-pixel baselines.
 
 ## 0.10.2
 

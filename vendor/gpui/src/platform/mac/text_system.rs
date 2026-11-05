@@ -1,15 +1,15 @@
 use crate::{
     Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun,
-    FontStyle, FontWeight, GlyphId, LineLayout, Pixels, PlatformTextSystem, Point,
+    FontStyle, FontWeight, GlyphId, Hsla, LineLayout, Pixels, PlatformTextSystem, Point,
     RenderGlyphParams, Result, SUBPIXEL_VARIANTS_X, ShapedGlyph, ShapedRun, SharedString, Size,
-    point, px, size, swap_rgba_pa_to_bgra,
+    glyph_dilation_for_luminance, point, px, size, swap_rgba_pa_to_bgra,
 };
 use anyhow::anyhow;
 use cocoa::appkit::CGFloat;
 use collections::HashMap;
 use core_foundation::{
     attributed_string::CFMutableAttributedString,
-    base::{CFRange, TCFType},
+    base::{CFRange, CFType, TCFType},
     number::CFNumber,
     string::CFString,
 };
@@ -43,7 +43,12 @@ use pathfinder_geometry::{
     vector::{Vector2F, Vector2I},
 };
 use smallvec::SmallVec;
-use std::{borrow::Cow, char, convert::TryFrom, sync::Arc};
+use std::{
+    borrow::Cow,
+    char,
+    convert::TryFrom,
+    sync::{Arc, OnceLock},
+};
 
 use super::open_type::apply_features_and_fallbacks;
 
@@ -185,6 +190,40 @@ impl PlatformTextSystem for MacTextSystem {
     fn layout_line(&self, text: &str, font_size: Pixels, font_runs: &[FontRun]) -> LineLayout {
         self.0.write().layout_line(text, font_size, font_runs)
     }
+
+    fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
+        // With font smoothing on (the macOS default), CoreGraphics thickens glyph strokes by
+        // an amount chosen from the foreground luminance. AppKit text gets this for free;
+        // GPUI rasterizes into an alpha-only mask, so the level has to be chosen up front.
+        if font_smoothing_allowed_by_user() {
+            glyph_dilation_for_luminance(color)
+        } else {
+            0
+        }
+    }
+}
+
+/// Mirrors `defaults read -g AppleFontSmoothing`; only an explicit `0` disables smoothing.
+fn font_smoothing_allowed_by_user() -> bool {
+    static ALLOWED: OnceLock<bool> = OnceLock::new();
+    *ALLOWED.get_or_init(|| {
+        use core_foundation_sys::preferences::{
+            CFPreferencesCopyAppValue, kCFPreferencesCurrentApplication,
+        };
+
+        let key = CFString::new("AppleFontSmoothing");
+        let value_ref = unsafe {
+            CFPreferencesCopyAppValue(key.as_concrete_TypeRef(), kCFPreferencesCurrentApplication)
+        };
+        if value_ref.is_null() {
+            return true;
+        }
+        let value = unsafe { CFType::wrap_under_create_rule(value_ref) };
+        let Some(number) = value.downcast_into::<CFNumber>() else {
+            return true;
+        };
+        number.to_i64() != Some(0)
+    })
 }
 
 impl MacTextSystemState {
@@ -330,7 +369,7 @@ impl MacTextSystemState {
     fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
         let font = &self.fonts[params.font_id.0];
         let scale = Transform2F::from_scale(params.scale_factor);
-        Ok(font
+        let bounds: Bounds<DevicePixels> = font
             .raster_bounds(
                 params.glyph_id.0,
                 params.font_size.into(),
@@ -338,7 +377,11 @@ impl MacTextSystemState {
                 HintingOptions::None,
                 font_kit::canvas::RasterizationOptions::GrayscaleAa,
             )?
-            .into())
+            .into();
+
+        // The outline's bounds leave no room for antialiased edge pixels or for font-smoothing
+        // dilation, which CoreGraphics would otherwise clip off the mask. Pad by a pixel.
+        Ok(bounds.dilate(DevicePixels(1)))
     }
 
     fn rasterize_glyph(
@@ -400,13 +443,24 @@ impl MacTextSystemState {
                 .subpixel_variant
                 .map(|v| v as f32 / SUBPIXEL_VARIANTS_X as f32);
             cx.set_text_drawing_mode(CGTextDrawingMode::CGTextFill);
-            cx.set_gray_fill_color(0.0, 1.0);
             cx.set_allows_antialiasing(true);
             cx.set_should_antialias(true);
             cx.set_allows_font_subpixel_positioning(true);
             cx.set_should_subpixel_position_fonts(true);
             cx.set_allows_font_subpixel_quantization(false);
             cx.set_should_subpixel_quantize_fonts(false);
+
+            // CoreGraphics derives the smoothing (dilation) strength from the fill color's
+            // luminance. The mask is alpha-only, so this gray never reaches the screen; it only
+            // selects the same stroke weight AppKit would use for the real text color.
+            if params.dilation > 0 && !params.is_emoji {
+                cx.set_allows_font_smoothing(true);
+                cx.set_should_smooth_fonts(true);
+                cx.set_gray_fill_color(f64::from(params.dilation) * 0.25, 1.0);
+            } else {
+                cx.set_should_smooth_fonts(false);
+                cx.set_gray_fill_color(0.0, 1.0);
+            }
             self.fonts[params.font_id.0]
                 .native_font()
                 .clone_with_font_size(f32::from(params.font_size) as CGFloat)
