@@ -323,6 +323,15 @@ impl TextInput {
         self.history_cursor = None;
     }
 
+    /// Painted canvas bounds and visual row widths from the last frame.
+    #[cfg(test)]
+    pub(crate) fn painted_rows(&self) -> (Option<Bounds<Pixels>>, Vec<Pixels>) {
+        (
+            self.last_bounds,
+            self.visual_lines.iter().map(|l| l.shaped.width).collect(),
+        )
+    }
+
     fn allows_newlines(&self) -> bool {
         matches!(self.kind, InputKind::Composer | InputKind::MultilineEditor)
     }
@@ -1033,6 +1042,10 @@ impl Render for TextInput {
         div()
             .w_full()
             .min_w_0()
+            // Stretch the canvas to the field. As a block child, its percentage width
+            // could keep a max-content result and paint unwrapped past the clip.
+            .flex()
+            .flex_col()
             .overflow_hidden()
             .when(self.kind == InputKind::Composer, |input| {
                 input.debug_selector(|| "composer-input".to_owned())

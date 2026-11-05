@@ -181,13 +181,17 @@ impl Element for TextCanvas {
                 cache.width = width;
             }
             let rows = cache.rows.len().clamp(state.min_lines, state.max_lines);
-            let intrinsic_width = || {
-                cache
+            // Editable text wraps or scrolls, so it can shrink to any width. Reporting
+            // the unwrapped width as min-content let a max-width ancestor size this
+            // field from its longest line and reserve height for a zero-width wrap.
+            let intrinsic_width = || match available.width {
+                AvailableSpace::MinContent => px(0.0),
+                _ => cache
                     .rows
                     .iter()
                     .map(|l| l.shaped.width)
                     .max()
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
             };
             size(
                 width.unwrap_or_else(intrinsic_width),
