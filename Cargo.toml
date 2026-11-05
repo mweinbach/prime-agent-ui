@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/pa-desktop"]
-exclude = ["harness"]
+exclude = ["harness", "vendor"]
 
 [workspace.package]
 version = "0.10.3"
@@ -13,6 +13,11 @@ futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 tokio = { version = "1", features = ["full"] }
+
+# GPUI 0.2.2 from crates.io with macOS text rasterization fixes backported from
+# upstream Zed. See vendor/gpui/PATCHES.md for the exact changes.
+[patch.crates-io]
+gpui = { path = "vendor/gpui" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
