@@ -131,6 +131,18 @@ fn streaming_repairs_only_unfinished_markdown_at_the_tail() {
             "before `open\n\nordinary end",
         ),
         ("> ```text\n> [literal", "> ```text\n> [literal"),
+        ("**", ""),
+        ("*", ""),
+        ("**Inspecting", "**Inspecting**"),
+        ("**Inspecting ", "**Inspecting** "),
+        ("**Inspecting*", "**Inspecting**"),
+        ("**Inspecting `stage.rs", "**Inspecting `stage.rs`**"),
+        (
+            "Checked **stage.rs** and **toast",
+            "Checked **stage.rs** and **toast**",
+        ),
+        ("2 * 3 and x**2", "2 * 3 and x**2"),
+        ("* list item", "* list item"),
     ] {
         assert_eq!(streaming::normalize(source), expected, "{source:?}");
     }

@@ -1063,7 +1063,7 @@ async fn dispatch_request(
                     .request(
                         DaemonCommand::Steer {
                             id: None,
-                            active_session_id,
+                            active_session_id: active_session_id.clone(),
                             message,
                             input: PromptInput {
                                 content: None,
@@ -1085,6 +1085,7 @@ async fn dispatch_request(
                     )
                     .await?,
             )?;
+            hydrate_session_state(client, &active_session_id, evt_tx).await;
         }
         BridgeRequest::FollowUpSession {
             active_session_id,
@@ -1095,7 +1096,7 @@ async fn dispatch_request(
                     .request(
                         DaemonCommand::FollowUp {
                             id: None,
-                            active_session_id,
+                            active_session_id: active_session_id.clone(),
                             message,
                             input: PromptInput {
                                 content: None,
@@ -1117,6 +1118,7 @@ async fn dispatch_request(
                     )
                     .await?,
             )?;
+            hydrate_session_state(client, &active_session_id, evt_tx).await;
         }
         BridgeRequest::AbortSession { active_session_id } => {
             check_daemon_ok(
@@ -1124,13 +1126,14 @@ async fn dispatch_request(
                     .request(
                         DaemonCommand::Abort {
                             id: None,
-                            active_session_id,
+                            active_session_id: active_session_id.clone(),
                             rest: Map::new(),
                         },
                         std_timeout,
                     )
                     .await?,
             )?;
+            hydrate_session_state(client, &active_session_id, evt_tx).await;
         }
         BridgeRequest::AbortAndSendQueued { active_session_id } => {
             check_daemon_ok(
@@ -1138,13 +1141,14 @@ async fn dispatch_request(
                     .request(
                         DaemonCommand::AbortAndSendQueued {
                             id: None,
-                            active_session_id,
+                            active_session_id: active_session_id.clone(),
                             rest: Map::new(),
                         },
                         std_timeout,
                     )
                     .await?,
             )?;
+            hydrate_session_state(client, &active_session_id, evt_tx).await;
         }
         BridgeRequest::ClearQueue { active_session_id } => {
             check_daemon_ok(
@@ -1152,13 +1156,14 @@ async fn dispatch_request(
                     .request(
                         DaemonCommand::ClearQueue {
                             id: None,
-                            active_session_id,
+                            active_session_id: active_session_id.clone(),
                             rest: Map::new(),
                         },
                         std_timeout,
                     )
                     .await?,
             )?;
+            hydrate_session_state(client, &active_session_id, evt_tx).await;
         }
         BridgeRequest::SetModel {
             active_session_id,
@@ -1356,6 +1361,7 @@ async fn dispatch_request(
                     data,
                 });
             }
+            hydrate_session_state(client, &active_session_id, evt_tx).await;
             load_inspector_snapshot(client, &active_session_id, evt_tx).await;
         }
         BridgeRequest::TailShell {
@@ -1858,7 +1864,7 @@ mod tests {
             .await
             .expect("desktop did not disconnect from the incompatible supervisor")
             .unwrap();
-        assert!(received.is_empty());
+        assert_eq!(received.as_slice(), &[] as &[u8]);
     }
 
     /// Critical-path guard (AGENTS.md): dispatching a request from the UI

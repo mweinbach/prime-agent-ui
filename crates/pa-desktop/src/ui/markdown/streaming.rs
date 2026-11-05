@@ -6,7 +6,7 @@ use std::{borrow::Cow, ops::Range};
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 
 pub(super) fn normalize(source: &str) -> Cow<'_, str> {
-    if source.ends_with('\n') || !source.contains(['`', '~', '[']) {
+    if source.ends_with('\n') || !source.contains(['`', '~', '[', '*']) {
         return Cow::Borrowed(source);
     }
     let mut inline_start = None;
@@ -15,13 +15,23 @@ pub(super) fn normalize(source: &str) -> Cow<'_, str> {
         Parser::new_ext(source, Options::ENABLE_TABLES | Options::ENABLE_GFM).into_offset_iter()
     {
         // Never interpret punctuation in an already parsed code span, HTML tag,
-        // or link as a new delimiter (including a complete reference link).
+        // link, or completed emphasis span as a new delimiter. A `Tag::Emphasis`
+        // that reaches EOF immediately after another `*` is left unprotected so
+        // a half-closed `**bold*` repairs to `**bold**` instead of `*` + italic.
+        let half_closed_strong = matches!(event, Event::Start(Tag::Emphasis))
+            && range.end == source.len()
+            && range.start > 0
+            && source.as_bytes()[range.start - 1] == b'*'
+            && source.ends_with('*');
         if inline_start.is_some()
+            && !half_closed_strong
             && matches!(
                 event,
                 Event::Code(_)
                     | Event::InlineHtml(_)
-                    | Event::Start(Tag::Link { .. } | Tag::Image { .. })
+                    | Event::Start(
+                        Tag::Link { .. } | Tag::Image { .. } | Tag::Strong | Tag::Emphasis
+                    )
             )
             && complete_spans
                 .last()
@@ -64,6 +74,7 @@ pub(super) fn normalize(source: &str) -> Cow<'_, str> {
     })
 }
 
+#[allow(clippy::too_many_lines)]
 fn normalize_inline<'a>(source: &'a str, start: usize, spans: &[Range<usize>]) -> Cow<'a, str> {
     let bytes = source.as_bytes();
     let mut i = start;
@@ -71,6 +82,8 @@ fn normalize_inline<'a>(source: &'a str, start: usize, spans: &[Range<usize>]) -
     let mut brackets = 0usize;
     let mut destination: Option<(usize, usize)> = None;
     let mut label_end = None;
+    let mut strong: Option<usize> = None;
+    let mut trailing_star: Option<usize> = None;
     let mut protected = spans.iter().peekable();
     while i < bytes.len() {
         if let Some(span) = protected.next_if(|span| i >= span.start) {
@@ -104,6 +117,35 @@ fn normalize_inline<'a>(source: &'a str, start: usize, spans: &[Range<usize>]) -
             continue;
         } else if code.is_none() {
             match ch {
+                b'\n' => {
+                    strong = None;
+                }
+                b'*' => {
+                    let width = bytes[i..].iter().take_while(|b| **b == b'*').count();
+                    if strong.is_some() {
+                        if width == 2 && !bytes[i - 1].is_ascii_whitespace() {
+                            strong = None;
+                        }
+                    } else {
+                        let at_boundary = i == start
+                            || matches!(
+                                bytes[i - 1],
+                                b' ' | b'\t' | b'\n' | b'\r' | b'(' | b'[' | b'"' | b'\''
+                            );
+                        if width == 2 && at_boundary {
+                            if i + 2 == bytes.len() || !bytes[i + 2].is_ascii_whitespace() {
+                                strong = Some(i);
+                            }
+                        } else if width == 1
+                            && i + 1 == bytes.len()
+                            && (i == start || bytes[i - 1].is_ascii_whitespace())
+                        {
+                            trailing_star = Some(i);
+                        }
+                    }
+                    i += width;
+                    continue;
+                }
                 b'[' => brackets += 1,
                 b']' if brackets > 0 => {
                     brackets -= 1;
@@ -121,13 +163,20 @@ fn normalize_inline<'a>(source: &'a str, start: usize, spans: &[Range<usize>]) -
         normalized.push_str("()");
         return Cow::Owned(normalized);
     }
-    if code.is_none() && brackets == 0 && label_end != Some(source.len()) {
+    if code.is_none()
+        && brackets == 0
+        && label_end != Some(source.len())
+        && strong.is_none()
+        && trailing_star.is_none()
+    {
         return Cow::Borrowed(source);
     }
     let mut normalized = source.to_owned();
+    let mut code_truncated_tail = false;
     if let Some((open, width)) = code {
         if open + width == bytes.len() {
             normalized.truncate(open);
+            code_truncated_tail = true;
         } else {
             // A shorter backtick run can legitimately be part of the span.
             if normalized.ends_with('`') {
@@ -135,6 +184,27 @@ fn normalize_inline<'a>(source: &'a str, start: usize, spans: &[Range<usize>]) -
             }
             normalized.extend(std::iter::repeat_n('`', width));
         }
+    }
+    if let Some(open) = strong {
+        if open + 2 >= normalized.len() {
+            normalized.truncate(open);
+        } else if !code_truncated_tail && normalized.ends_with('*') && normalized.len() > open + 2 {
+            normalized.push('*');
+        } else {
+            let trimmed_len = normalized.trim_end_matches([' ', '\t']).len();
+            if trimmed_len <= open + 2 {
+                normalized.truncate(open);
+            } else if trimmed_len < normalized.len() {
+                normalized.insert_str(trimmed_len, "**");
+            } else {
+                normalized.push_str("**");
+            }
+        }
+    } else if let Some(star) = trailing_star
+        && code.is_none()
+        && brackets == 0
+    {
+        normalized.truncate(star);
     }
     if brackets > 0 {
         normalized.extend(std::iter::repeat_n(']', brackets));

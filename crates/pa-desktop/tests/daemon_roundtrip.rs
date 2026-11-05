@@ -438,7 +438,7 @@ fn return_in_the_composer_sends_the_prompt_and_displays_the_reply() {
         )
     });
     view.read_with(cx, |workspace, cx| {
-        assert!(workspace.composer_input.read(cx).text().is_empty());
+        assert_eq!(workspace.composer_input.read(cx).text(), "");
         let messages = &workspace.session.entries;
         assert!(matches!(messages.as_slice(), [
             TranscriptEntry::User { text, .. },

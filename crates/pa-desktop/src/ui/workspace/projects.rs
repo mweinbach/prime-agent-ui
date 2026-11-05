@@ -291,7 +291,7 @@ mod tests {
             view.new_project_chat(&history[0].draft_cwds[0], window, cx);
             assert_eq!(view.working_cwd, checkout);
             assert_eq!(view.composer_input.read(cx).text(), "resume from checkout");
-            assert!(view.session.active_session_id.is_empty());
+            assert_eq!(view.session.active_session_id, "");
         });
         app.quit();
     }
@@ -345,7 +345,7 @@ mod tests {
         view.update_in(cx, |view, window, cx| {
             view.add_project(&folder, window, cx);
             view.add_project(&folder, window, cx);
-            assert!(view.session.active_session_id.is_empty());
+            assert_eq!(view.session.active_session_id, "");
             assert_eq!(view.sidebar_project.as_deref(), folder.to_str());
         });
         let prefs = DesktopPreferences::load(&agent);

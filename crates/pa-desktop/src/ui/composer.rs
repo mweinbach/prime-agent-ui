@@ -59,19 +59,25 @@ pub fn render_composer(
     let is_bash_bang = trimmed.starts_with('!');
     let is_streaming = view.session.is_streaming;
 
-    let slash_matches = slash_matches(&draft);
+    let slash_matches = view.visible_slash_matches(cx);
     let match_count = slash_matches.len();
+    let selected_idx = view.slash_selected_idx.min(match_count.saturating_sub(1));
 
     div()
         .when(match_count > 0, |d| {
             d.key_context("PaCompletions")
                 .capture_action(cx.listener(move |view, _: &Up, _, cx| {
-                    view.slash_selected_idx = view.slash_selected_idx.saturating_sub(1);
+                    view.slash_selected_idx = view
+                        .slash_selected_idx
+                        .min(match_count.saturating_sub(1))
+                        .saturating_sub(1);
                     cx.stop_propagation();
                     cx.notify();
                 }))
                 .capture_action(cx.listener(move |view, _: &Down, _, cx| {
-                    view.slash_selected_idx = (view.slash_selected_idx + 1).min(match_count - 1);
+                    view.slash_selected_idx =
+                        (view.slash_selected_idx.min(match_count.saturating_sub(1)) + 1)
+                            .min(match_count - 1);
                     cx.stop_propagation();
                     cx.notify();
                 }))
@@ -97,22 +103,69 @@ pub fn render_composer(
                 .when(!slash_matches.is_empty(), |d| {
                     d.child(
                         div()
+                            .id("slash-popover")
+                            .debug_selector(|| "slash-popover".to_owned())
                             .w_full()
                             .rounded_xl()
                             .border_1()
                             .border_color(palette.border_strong)
                             .bg(palette.bg_elevated)
+                            .shadow_sm()
                             .p(px(6.0))
                             .flex()
                             .flex_col()
                             .gap(px(2.0))
+                            .child(
+                                div()
+                                    .px(px(8.0))
+                                    .py(px(2.0))
+                                    .flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .child(
+                                        div()
+                                            .text_size(px(11.0))
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(palette.text_muted)
+                                            .child("Commands"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex()
+                                            .items_center()
+                                            .gap(px(6.0))
+                                            .child(
+                                                div()
+                                                    .font_family(font_mono())
+                                                    .text_size(px(10.5))
+                                                    .text_color(palette.text_muted)
+                                                    .child("Esc"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id("slash-popover-close")
+                                                    .debug_selector(|| {
+                                                        "slash-popover-close".to_owned()
+                                                    })
+                                                    .p(px(3.0))
+                                                    .rounded_md()
+                                                    .cursor_pointer()
+                                                    .hover(|s| s.bg(palette.bg_hover))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.dismiss_slash_menu(cx);
+                                                    }))
+                                                    .child(
+                                                        Icon::Close
+                                                            .render(11.5, palette.text_muted),
+                                                    ),
+                                            ),
+                                    ),
+                            )
                             .children(slash_matches.into_iter().enumerate().map(
                                 |(index, (cmd, desc))| {
                                     div()
                                         .id(SharedString::from(format!("slash-opt-{cmd}")))
-                                        .when(index == view.slash_selected_idx, |d| {
-                                            d.bg(palette.bg_selected)
-                                        })
+                                        .when(index == selected_idx, |d| d.bg(palette.bg_selected))
                                         .px(px(10.0))
                                         .py(px(6.0))
                                         .rounded_lg()
@@ -121,11 +174,14 @@ pub fn render_composer(
                                         .flex()
                                         .items_center()
                                         .justify_between()
+                                        .gap(px(10.0))
                                         .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.dismissed_slash_draft = None;
                                             this.populate_draft(cmd, window, cx);
                                         }))
                                         .child(
                                             div()
+                                                .flex_none()
                                                 .font_family(font_mono())
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_size(px(12.5))
@@ -410,6 +466,9 @@ pub fn render_composer(
                                             vec![
                                                 div()
                                                     .id("composer-send-btn")
+                                                    .debug_selector(|| {
+                                                        "composer-send-btn".to_owned()
+                                                    })
                                                     .w(px(34.0))
                                                     .h(px(34.0))
                                                     .rounded_full()
@@ -453,9 +512,21 @@ fn render_queued_strip(
 ) -> AnyElement {
     let sid = view.session.active_session_id.clone();
     let sid_clear = sid.clone();
+    let sid_close = sid.clone();
     let total = view.session.queued.steering.len() + view.session.queued.follow_ups.len();
+    let badge = if total > 0 {
+        pill(
+            &format!("Queued ({total})"),
+            palette.warning_soft,
+            palette.warning,
+        )
+    } else {
+        pill("Preparing", palette.accent_soft, palette.accent)
+    };
 
     div()
+        .id("queued-strip")
+        .debug_selector(|| "queued-strip".to_owned())
         .w_full()
         .px(px(12.0))
         .py(px(7.0))
@@ -475,11 +546,7 @@ fn render_queued_strip(
                 .flex_1()
                 .min_w_0()
                 .overflow_hidden()
-                .child(pill(
-                    &format!("Queued ({total})"),
-                    palette.warning_soft,
-                    palette.warning,
-                ))
+                .child(badge)
                 .child(
                     div()
                         .text_size(px(12.0))
@@ -504,43 +571,83 @@ fn render_queued_strip(
                 .gap(px(6.0))
                 .flex_none()
                 .whitespace_nowrap()
+                .when(total > 0, |row| {
+                    row.child(
+                        div()
+                            .id("queue-send-now-btn")
+                            .debug_selector(|| "queue-send-now-btn".to_owned())
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .bg(palette.accent_soft)
+                            .hover(|s| s.bg(palette.bg_hover))
+                            .text_size(px(11.5))
+                            .text_color(palette.accent)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.session.queued.steering.clear();
+                                this.session.queued.follow_ups.clear();
+                                this.session.queued.preparing = None;
+                                if !sid.is_empty() {
+                                    this.bridge.send(BridgeRequest::AbortAndSendQueued {
+                                        active_session_id: sid.clone(),
+                                    });
+                                }
+                                cx.notify();
+                            }))
+                            .child("Interrupt & send"),
+                    )
+                    .child(
+                        div()
+                            .id("queue-clear-btn")
+                            .debug_selector(|| "queue-clear-btn".to_owned())
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .rounded_md()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(palette.bg_hover))
+                            .text_size(px(11.5))
+                            .text_color(palette.text_muted)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.session.queued.steering.clear();
+                                this.session.queued.follow_ups.clear();
+                                this.session.queued.preparing = None;
+                                if !sid_clear.is_empty() {
+                                    this.bridge.send(BridgeRequest::ClearQueue {
+                                        active_session_id: sid_clear.clone(),
+                                    });
+                                }
+                                cx.notify();
+                            }))
+                            .child("Clear"),
+                    )
+                })
                 .child(
                     div()
-                        .id("queue-send-now-btn")
-                        .px(px(8.0))
-                        .py(px(3.0))
+                        .id("queue-close-btn")
+                        .debug_selector(|| "queue-close-btn".to_owned())
+                        .w(px(22.0))
+                        .h(px(22.0))
                         .rounded_md()
-                        .cursor_pointer()
-                        .bg(palette.accent_soft)
-                        .text_size(px(11.5))
-                        .text_color(palette.accent)
-                        .on_click(cx.listener(move |this, _, _, _cx| {
-                            if !sid.is_empty() {
-                                this.bridge.send(BridgeRequest::AbortAndSendQueued {
-                                    active_session_id: sid.clone(),
-                                });
-                            }
-                        }))
-                        .child("Interrupt & send"),
-                )
-                .child(
-                    div()
-                        .id("queue-clear-btn")
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded_md()
+                        .flex()
+                        .items_center()
+                        .justify_center()
                         .cursor_pointer()
                         .hover(|s| s.bg(palette.bg_hover))
-                        .text_size(px(11.5))
-                        .text_color(palette.text_muted)
-                        .on_click(cx.listener(move |this, _, _, _cx| {
-                            if !sid_clear.is_empty() {
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let had_queued = !this.session.queued.steering.is_empty()
+                                || !this.session.queued.follow_ups.is_empty();
+                            this.session.queued.steering.clear();
+                            this.session.queued.follow_ups.clear();
+                            this.session.queued.preparing = None;
+                            if had_queued && !sid_close.is_empty() {
                                 this.bridge.send(BridgeRequest::ClearQueue {
-                                    active_session_id: sid_clear.clone(),
+                                    active_session_id: sid_close.clone(),
                                 });
                             }
+                            cx.notify();
                         }))
-                        .child("Clear"),
+                        .child(Icon::Close.render(12.0, palette.text_muted)),
                 ),
         )
         .into_any_element()

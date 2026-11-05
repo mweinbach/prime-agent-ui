@@ -90,13 +90,13 @@ fn browsing_a_project_leaves_the_current_draft_until_compose_is_clicked() {
     assert!(cx.debug_bounds("sidebar-empty").is_some());
     click(cx, "sidebar-search-clear");
     view.read_with(cx, |view, cx| {
-        assert!(view.sidebar_search_input.read(cx).text().is_empty());
+        assert_eq!(view.sidebar_search_input.read(cx).text(), "");
     });
     click(cx, "sidebar-compose");
     view.read_with(cx, |view, cx| {
         assert_eq!(view.working_cwd, BETA);
-        assert!(view.composer_input.read(cx).text().is_empty());
-        assert!(view.session.active_session_id.is_empty());
+        assert_eq!(view.composer_input.read(cx).text(), "");
+        assert_eq!(view.session.active_session_id, "");
     });
     click(cx, "sidebar-all-projects");
     view.read_with(cx, |view, _| assert!(view.sidebar_project.is_none()));

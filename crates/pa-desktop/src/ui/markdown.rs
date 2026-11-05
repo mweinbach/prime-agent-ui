@@ -35,22 +35,55 @@ pub fn render_markdown_streaming(
     streaming: bool,
     palette: Palette,
 ) -> AnyElement {
+    render_with_variant(id_prefix, markdown, streaming, Variant::Body, palette)
+}
+
+/// Render a reasoning trace (settled or streaming) with subordinate editorial typography.
+#[must_use]
+pub fn render_thinking_markdown_streaming(
+    id_prefix: &str,
+    markdown: &str,
+    streaming: bool,
+    palette: Palette,
+) -> AnyElement {
+    render_with_variant(id_prefix, markdown, streaming, Variant::Thinking, palette)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Variant {
+    Body,
+    Thinking,
+}
+
+fn render_with_variant(
+    id_prefix: &str,
+    markdown: &str,
+    streaming: bool,
+    variant: Variant,
+    palette: Palette,
+) -> AnyElement {
     let source = if streaming {
         streaming::normalize(markdown)
     } else {
         Cow::Borrowed(markdown)
     };
+    let base = match variant {
+        Variant::Body => TypeStyle::body(palette),
+        Variant::Thinking => TypeStyle::thinking(palette),
+    };
     Renderer {
         prefix: id_prefix,
         serial: 0,
+        variant,
         palette,
     }
-    .block(document::parse(&source), &TypeStyle::body(palette))
+    .block(document::parse(&source), &base)
 }
 
 struct Renderer<'a> {
     prefix: &'a str,
     serial: usize,
+    variant: Variant,
     palette: Palette,
 }
 
@@ -69,11 +102,29 @@ impl TypeStyle {
             ink: palette.text_primary,
         }
     }
+
+    fn thinking(palette: Palette) -> Self {
+        Self {
+            family: font_sans(),
+            weight: FontWeight::NORMAL,
+            ink: palette.text_secondary,
+        }
+    }
 }
 
 type Links = Vec<(Range<usize>, String)>;
 
+#[cfg(test)]
 fn inline_runs(inline: &Inline, base: &TypeStyle, palette: Palette) -> (Vec<TextRun>, Links) {
+    inline_runs_for_variant(inline, base, Variant::Body, palette)
+}
+
+fn inline_runs_for_variant(
+    inline: &Inline,
+    base: &TypeStyle,
+    variant: Variant,
+    palette: Palette,
+) -> (Vec<TextRun>, Links) {
     let mut links: Links = Vec::new();
     let runs = inline
         .spans
@@ -85,7 +136,10 @@ fn inline_runs(inline: &Inline, base: &TypeStyle, palette: Palette) -> (Vec<Text
                 base.family.clone()
             });
             face.weight = if style.bold {
-                FontWeight::BOLD
+                match variant {
+                    Variant::Body => FontWeight::BOLD,
+                    Variant::Thinking => FontWeight::SEMIBOLD,
+                }
             } else if style.code && base.weight < FontWeight::MEDIUM {
                 FontWeight::MEDIUM
             } else {
@@ -108,6 +162,8 @@ fn inline_runs(inline: &Inline, base: &TypeStyle, palette: Palette) -> (Vec<Text
                 palette.info
             } else if style.code || style.checkbox {
                 palette.accent
+            } else if style.bold && variant == Variant::Thinking {
+                palette.text_primary.opacity(0.86)
             } else {
                 base.ink
             };
@@ -139,9 +195,10 @@ impl Renderer<'_> {
 
     fn block(&mut self, block: Block, style: &TypeStyle) -> AnyElement {
         let palette = self.palette;
+        let is_thinking = self.variant == Variant::Thinking;
         match block {
             Block::Text(inline) => {
-                let (runs, links) = inline_runs(&inline, style, palette);
+                let (runs, links) = inline_runs_for_variant(&inline, style, self.variant, palette);
                 SelectableText::new(self.id(), inline.text, palette)
                     .with_runs(runs)
                     .with_links(links)
@@ -150,7 +207,7 @@ impl Renderer<'_> {
             Block::Rule => div()
                 .w_full()
                 .h(px(1.))
-                .my(px(6.))
+                .my(if is_thinking { px(4.) } else { px(6.) })
                 .bg(palette.border_subtle)
                 .into_any_element(),
             Block::Code(lang, text) => render_code_block(&self.id(), &lang, &text, palette),
@@ -158,30 +215,53 @@ impl Renderer<'_> {
                 Kind::Root => div()
                     .flex()
                     .flex_col()
-                    .gap(px(9.))
+                    .gap(if is_thinking { px(6.) } else { px(9.) })
                     .w_full()
                     .min_w_0()
-                    .text_size(px(14.5))
-                    .line_height(px(23.))
+                    .text_size(if is_thinking { px(13.) } else { px(14.5) })
+                    .line_height(if is_thinking { px(19.5) } else { px(23.) })
                     .children(children.into_iter().map(|b| self.block(b, style)))
                     .into_any_element(),
                 Kind::Heading(level) => {
-                    let (size, height, family) = match level {
-                        HeadingLevel::H1 => (22., 30., font_display()),
-                        HeadingLevel::H2 => (19., 27., font_display()),
-                        HeadingLevel::H3 => (16.5, 24., font_display()),
-                        HeadingLevel::H4 => (15., 22., font_sans()),
-                        HeadingLevel::H5 => (14., 21., font_sans()),
-                        HeadingLevel::H6 => (13., 20., font_sans()),
+                    let (size, height, family, top_pad, ink) = if is_thinking {
+                        match level {
+                            HeadingLevel::H1 | HeadingLevel::H2 => (
+                                13.5,
+                                20.,
+                                font_sans(),
+                                2.,
+                                palette.text_primary.opacity(0.88),
+                            ),
+                            HeadingLevel::H3
+                            | HeadingLevel::H4
+                            | HeadingLevel::H5
+                            | HeadingLevel::H6 => (
+                                13.,
+                                19.5,
+                                font_sans(),
+                                1.5,
+                                palette.text_primary.opacity(0.86),
+                            ),
+                        }
+                    } else {
+                        let (s, h, f) = match level {
+                            HeadingLevel::H1 => (22., 30., font_display()),
+                            HeadingLevel::H2 => (19., 27., font_display()),
+                            HeadingLevel::H3 => (16.5, 24., font_display()),
+                            HeadingLevel::H4 => (15., 22., font_sans()),
+                            HeadingLevel::H5 => (14., 21., font_sans()),
+                            HeadingLevel::H6 => (13., 20., font_sans()),
+                        };
+                        (s, h, f, 5., style.ink)
                     };
                     let heading = TypeStyle {
                         family,
                         weight: FontWeight::SEMIBOLD,
-                        ink: style.ink,
+                        ink,
                     };
                     div()
                         .min_w_0()
-                        .pt(px(5.))
+                        .pt(px(top_pad))
                         .text_size(px(size))
                         .line_height(px(height))
                         .children(children.into_iter().map(|b| self.block(b, &heading)))
@@ -202,7 +282,11 @@ impl Renderer<'_> {
                             .child(
                                 div()
                                     .flex_none()
-                                    .text_color(palette.text_secondary)
+                                    .text_color(if is_thinking {
+                                        palette.text_muted
+                                    } else {
+                                        palette.text_secondary
+                                    })
                                     .child(marker),
                             )
                             .child(div().flex_1().min_w_0().child(self.block(child, style)))
@@ -210,7 +294,7 @@ impl Renderer<'_> {
                     div()
                         .flex()
                         .flex_col()
-                        .gap(px(5.))
+                        .gap(if is_thinking { px(3.5) } else { px(5.) })
                         .min_w_0()
                         .children(rows)
                         .into_any_element()
@@ -219,7 +303,7 @@ impl Renderer<'_> {
                 Kind::Item | Kind::Paragraph | Kind::Cell | Kind::Row => div()
                     .flex()
                     .flex_col()
-                    .gap(px(5.))
+                    .gap(if is_thinking { px(4.) } else { px(5.) })
                     .min_w_0()
                     .children(children.into_iter().map(|b| self.block(b, style)))
                     .into_any_element(),
