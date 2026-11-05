@@ -3,6 +3,7 @@
 mod edit_diff;
 
 use std::collections::HashMap;
+use std::time::Instant;
 
 use edit_diff::build_edit_arg_diff;
 
@@ -10,10 +11,117 @@ use pa_types::ai::is_python_tool_name;
 use pa_types::goal::GoalState;
 use serde_json::Value;
 
+/// Structured reasoning trace block inside an assistant response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ThinkingBlock {
+    pub text: String,
+    pub streaming: bool,
+    pub redacted: bool,
+    pub duration_ms: Option<u64>,
+}
+
+impl ThinkingBlock {
+    #[must_use]
+    pub fn plain(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            streaming: false,
+            redacted: false,
+            duration_ms: None,
+        }
+    }
+
+    /// Human-readable elapsed reasoning duration once settled (omitted under 0.5s).
+    #[must_use]
+    pub fn formatted_duration(&self) -> Option<String> {
+        let ms = self.duration_ms?;
+        if ms < 500 {
+            return None;
+        }
+        let secs = ms.saturating_add(500) / 1_000;
+        let secs = secs.max(1);
+        if secs < 60 {
+            Some(format!("{secs}s"))
+        } else {
+            let mins = secs / 60;
+            let rem = secs % 60;
+            if rem == 0 {
+                Some(format!("{mins}m"))
+            } else {
+                Some(format!("{mins}m {rem}s"))
+            }
+        }
+    }
+
+    /// Concise single-line step title or topic extracted from the trace.
+    #[must_use]
+    pub fn headline(&self) -> Option<String> {
+        let non_empty: Vec<&str> = self
+            .text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !is_fence_marker(line))
+            .collect();
+        if non_empty.is_empty() {
+            return None;
+        }
+        let last_idx = non_empty.len() - 1;
+        if self.streaming {
+            for (idx, line) in non_empty.iter().enumerate().rev() {
+                if let Some(heading) = extract_step_heading(line, idx == last_idx) {
+                    return Some(crate::state::truncate_chars(&heading, 64));
+                }
+            }
+            let tail = strip_inline_markdown(non_empty[last_idx]);
+            (!tail.is_empty()).then(|| crate::state::truncate_chars(&tail, 64))
+        } else {
+            for line in &non_empty {
+                if let Some(heading) = extract_step_heading(line, false) {
+                    return Some(crate::state::truncate_chars(&heading, 64));
+                }
+            }
+            let first = strip_inline_markdown(non_empty[0]);
+            (!first.is_empty()).then(|| crate::state::truncate_chars(&first, 64))
+        }
+    }
+
+    /// Compact trailing prose lines for smooth `Overview` live preview while streaming.
+    #[must_use]
+    pub fn live_preview_lines(&self, max_lines: usize) -> Vec<String> {
+        if max_lines == 0 {
+            return Vec::new();
+        }
+        let headline = self.headline();
+        let mut collected: Vec<String> = Vec::with_capacity(max_lines);
+        for raw in self.text.lines().rev() {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() || is_fence_marker(trimmed) {
+                continue;
+            }
+            if extract_step_heading(trimmed, true).is_some() {
+                continue;
+            }
+            let cleaned = strip_inline_markdown(trimmed);
+            if cleaned.is_empty() {
+                continue;
+            }
+            if headline.as_deref() == Some(cleaned.as_str()) {
+                continue;
+            }
+            collected.push(crate::state::truncate_chars(&cleaned, 112));
+            if collected.len() >= max_lines {
+                break;
+            }
+        }
+        collected.reverse();
+        collected
+    }
+}
+
 /// One block inside an assistant response.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssistantBlock {
-    Thinking(String),
+    Thinking(ThinkingBlock),
     Text(String),
 }
 
@@ -205,6 +313,7 @@ pub struct AttachedSessionState {
     pub side_question: SideQuestionState,
     next_seq: u64,
     snapshot_buffer: Vec<Value>,
+    thinking_started_at: Option<Instant>,
 }
 
 impl AttachedSessionState {
@@ -263,6 +372,11 @@ impl AttachedSessionState {
     }
 
     #[must_use]
+    pub fn explicit_expansion(&self, key: &str) -> Option<bool> {
+        self.expansion_overrides.get(key).copied()
+    }
+
+    #[must_use]
     pub fn is_expanded(&self, key: &str, default_open: bool) -> bool {
         self.expansion_overrides
             .get(key)
@@ -279,6 +393,7 @@ impl AttachedSessionState {
         self.entries.clear();
         self.snapshot_buffer.clear();
         self.working_note = None;
+        self.thinking_started_at = None;
 
         if let Some(state) = snapshot.get("state") {
             self.apply_state_object(state);
@@ -311,6 +426,7 @@ impl AttachedSessionState {
         self.active_session_id = active_session_id.to_string();
         self.entries.clear();
         self.snapshot_buffer.clear();
+        self.thinking_started_at = None;
         if let Some(state) = header.get("state") {
             self.apply_state_object(state);
         }
@@ -445,7 +561,7 @@ impl AttachedSessionState {
                 }
             }
             "assistant" => {
-                self.push_or_update_assistant(message, false);
+                self.push_or_update_assistant(message, false, None, None);
             }
             "toolResult" => {
                 let call_id = message
@@ -509,21 +625,29 @@ impl AttachedSessionState {
 
     /// Fold one live `session_event` JSON object into the active transcript.
     pub fn apply_live_event(&mut self, event: &Value) {
+        self.apply_live_event_at(event, Instant::now());
+    }
+
+    /// Fold one live `session_event` JSON object using a caller-supplied timestamp.
+    pub fn apply_live_event_at(&mut self, event: &Value, now: Instant) {
         let Some(event_type) = event.get("type").and_then(Value::as_str) else {
             return;
         };
         match event_type {
             "agent_start" | "turn_start" => {
                 self.is_streaming = true;
+                self.queued.preparing = None;
             }
             "agent_end" => {
                 self.is_streaming = false;
                 self.working_note = None;
-                self.finish_streaming_assistant();
+                self.queued.preparing = None;
+                self.finish_streaming_assistant(Some(now));
             }
             "turn_end" => {
                 self.working_note = None;
-                self.finish_streaming_assistant();
+                self.queued.preparing = None;
+                self.finish_streaming_assistant(Some(now));
                 if let Some(err) = event
                     .get("error")
                     .and_then(Value::as_str)
@@ -551,17 +675,43 @@ impl AttachedSessionState {
                     return;
                 };
                 let streaming = event_type != "message_end";
+                let sub_event = event
+                    .get("assistantMessageEvent")
+                    .and_then(|sub| sub.get("type"))
+                    .and_then(Value::as_str);
                 match message.get("role").and_then(Value::as_str) {
                     Some("user") if event_type == "message_start" => {
+                        self.queued.preparing = None;
                         if let Some(entry) = self.decode_user_message(message) {
+                            if let TranscriptEntry::User { text, .. } = &entry {
+                                let trimmed = text.trim();
+                                if self
+                                    .queued
+                                    .steering
+                                    .first()
+                                    .is_some_and(|s| s.trim() == trimmed)
+                                {
+                                    self.queued.steering.remove(0);
+                                } else if self
+                                    .queued
+                                    .follow_ups
+                                    .first()
+                                    .is_some_and(|s| s.trim() == trimmed)
+                                {
+                                    self.queued.follow_ups.remove(0);
+                                }
+                            }
                             self.entries.push(entry);
                         }
                     }
                     Some("assistant") => {
+                        if event_type == "message_start" {
+                            self.queued.preparing = None;
+                        }
                         if streaming {
                             self.is_streaming = true;
                         }
-                        self.push_or_update_assistant(message, streaming);
+                        self.push_or_update_assistant(message, streaming, sub_event, Some(now));
                     }
                     Some("custom") if event_type == "message_start" => {
                         if let Some(entry) = self.decode_custom_message(message) {
@@ -573,6 +723,7 @@ impl AttachedSessionState {
             }
             "tool_execution_start" => {
                 self.is_streaming = true;
+                self.settle_open_thinking_blocks(Some(now));
                 let id = event
                     .get("toolCallId")
                     .and_then(Value::as_str)
@@ -794,7 +945,46 @@ impl AttachedSessionState {
         }
     }
 
-    fn finish_streaming_assistant(&mut self) {
+    fn take_elapsed_thinking_ms(&mut self, now: Option<Instant>) -> Option<u64> {
+        let started = self.thinking_started_at.take()?;
+        let now_ts = now?;
+        let ms = u64::try_from(now_ts.saturating_duration_since(started).as_millis())
+            .unwrap_or(u64::MAX);
+        (ms >= 500).then_some(ms)
+    }
+
+    fn settle_open_thinking_blocks(&mut self, now: Option<Instant>) {
+        let elapsed = self.take_elapsed_thinking_ms(now);
+        for entry in self.entries.iter_mut().rev() {
+            if let TranscriptEntry::Assistant { blocks, .. } = entry {
+                for block in blocks.iter_mut() {
+                    if let AssistantBlock::Thinking(tb) = block
+                        && tb.streaming
+                    {
+                        tb.streaming = false;
+                        if tb.duration_ms.is_none() {
+                            tb.duration_ms = elapsed;
+                        }
+                    }
+                }
+                blocks.retain(|b| {
+                    !matches!(
+                        b,
+                        AssistantBlock::Thinking(tb) if tb.text.trim().is_empty() && !tb.redacted
+                    )
+                });
+            }
+        }
+        self.entries.retain(|entry| {
+            !matches!(
+                entry,
+                TranscriptEntry::Assistant { blocks, error: None, .. } if blocks.is_empty()
+            )
+        });
+    }
+
+    fn finish_streaming_assistant(&mut self, now: Option<Instant>) {
+        self.settle_open_thinking_blocks(now);
         for entry in self.entries.iter_mut().rev() {
             if let TranscriptEntry::Assistant { streaming, .. } = entry
                 && *streaming
@@ -848,25 +1038,56 @@ impl AttachedSessionState {
         })
     }
 
-    fn push_or_update_assistant(&mut self, message: &Value, streaming: bool) {
+    #[allow(clippy::too_many_lines)]
+    fn push_or_update_assistant(
+        &mut self,
+        message: &Value,
+        streaming: bool,
+        sub_event: Option<&str>,
+        now: Option<Instant>,
+    ) {
         let mut blocks: Vec<AssistantBlock> = Vec::new();
         let mut tool_calls: Vec<(String, String, Value)> = Vec::new();
+        let sub_ended = matches!(sub_event, Some("thinking_end" | "done" | "error"));
 
         match message.get("content") {
             Some(Value::String(s)) if !s.trim().is_empty() => {
                 blocks.push(AssistantBlock::Text(s.clone()));
             }
             Some(Value::Array(items)) => {
-                for item in items {
+                let len = items.len();
+                for (idx, item) in items.iter().enumerate() {
                     match item.get("type").and_then(Value::as_str) {
                         Some("thinking") => {
-                            let thought = item
+                            let raw_thought = item
                                 .get("thinking")
                                 .or_else(|| item.get("text"))
                                 .and_then(Value::as_str)
                                 .unwrap_or_default();
-                            if !thought.trim().is_empty() {
-                                blocks.push(AssistantBlock::Thinking(thought.to_string()));
+                            let clean_text = raw_thought.trim_end_matches(['\n', '\r']).to_string();
+                            let redacted = item
+                                .get("redacted")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false);
+                            let item_streaming = streaming && (idx + 1 == len) && !sub_ended;
+                            if !clean_text.trim().is_empty() || redacted || item_streaming {
+                                if let Some(AssistantBlock::Thinking(prev)) = blocks.last_mut() {
+                                    if !clean_text.trim().is_empty() {
+                                        if !prev.text.is_empty() {
+                                            prev.text.push_str("\n\n");
+                                        }
+                                        prev.text.push_str(&clean_text);
+                                    }
+                                    prev.streaming = item_streaming;
+                                    prev.redacted |= redacted;
+                                } else {
+                                    blocks.push(AssistantBlock::Thinking(ThinkingBlock {
+                                        text: clean_text,
+                                        streaming: item_streaming,
+                                        redacted,
+                                        duration_ms: None,
+                                    }));
+                                }
                             }
                         }
                         Some("text") => {
@@ -920,41 +1141,111 @@ impl AttachedSessionState {
             .filter(|s| !s.is_empty())
             .map(str::to_string);
 
-        if !blocks.is_empty() || error.is_some() {
-            if let Some(TranscriptEntry::Assistant {
+        let last_user_idx = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, TranscriptEntry::User { .. }));
+        let search_start = last_user_idx.map_or(0, |idx| idx + 1);
+        let existing_idx = self.entries[search_start..]
+            .iter()
+            .rposition(|e| {
+                matches!(
+                    e,
+                    TranscriptEntry::Assistant {
+                        streaming: true,
+                        ..
+                    }
+                )
+            })
+            .map(|rel| search_start + rel);
+
+        if let Some(idx) = existing_idx {
+            type PreservedThinking = Vec<(usize, ThinkingBlock)>;
+            type PrevThinkingMeta = Vec<(bool, Option<u64>)>;
+            let (preserved_thinking, prev_thinking_meta): (PreservedThinking, PrevThinkingMeta) =
+                if let TranscriptEntry::Assistant {
+                    blocks: existing_blocks,
+                    ..
+                } = &self.entries[idx]
+                {
+                    let preserved = existing_blocks
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(pos, block)| match block {
+                            AssistantBlock::Thinking(tb)
+                                if !tb.text.trim().is_empty() || tb.redacted =>
+                            {
+                                let mut settled = tb.clone();
+                                settled.streaming = false;
+                                Some((pos, settled))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    let meta = existing_blocks
+                        .iter()
+                        .filter_map(|block| match block {
+                            AssistantBlock::Thinking(tb) => Some((tb.streaming, tb.duration_ms)),
+                            AssistantBlock::Text(_) => None,
+                        })
+                        .collect();
+                    (preserved, meta)
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+
+            // Some providers finish with only the answer or only tool calls after streaming a
+            // separate trace. Keep that trace at its original position so disclosures stay stable.
+            if !blocks
+                .iter()
+                .any(|block| matches!(block, AssistantBlock::Thinking(_)))
+                && (!streaming
+                    || !tool_calls.is_empty()
+                    || blocks
+                        .iter()
+                        .any(|block| matches!(block, AssistantBlock::Text(_))))
+            {
+                for (pos, tb) in preserved_thinking {
+                    blocks.insert(pos.min(blocks.len()), AssistantBlock::Thinking(tb));
+                }
+            }
+
+            let mut think_ord = 0usize;
+            for block in &mut blocks {
+                if let AssistantBlock::Thinking(curr) = block {
+                    let (was_streaming, prev_dur) = prev_thinking_meta
+                        .get(think_ord)
+                        .copied()
+                        .unwrap_or((false, None));
+                    think_ord += 1;
+                    if curr.duration_ms.is_none() {
+                        curr.duration_ms = prev_dur;
+                    }
+                    if curr.streaming {
+                        if self.thinking_started_at.is_none() {
+                            self.thinking_started_at = now;
+                        }
+                    } else if curr.duration_ms.is_none()
+                        && (was_streaming || self.thinking_started_at.is_some())
+                    {
+                        curr.duration_ms = self.take_elapsed_thinking_ms(now);
+                    }
+                }
+            }
+
+            if blocks.is_empty() && error.is_none() {
+                if !streaming || !tool_calls.is_empty() {
+                    self.thinking_started_at = None;
+                    self.entries.remove(idx);
+                }
+            } else if let TranscriptEntry::Assistant {
                 blocks: existing_blocks,
                 streaming: existing_stream,
                 model_label: existing_model,
                 error: existing_err,
                 ..
-            }) = self
-                .entries
-                .iter_mut()
-                .rev()
-                .take_while(|e| !matches!(e, TranscriptEntry::User { .. }))
-                .find(|e| {
-                    matches!(
-                        e,
-                        TranscriptEntry::Assistant {
-                            streaming: true,
-                            ..
-                        }
-                    )
-                })
+            } = &mut self.entries[idx]
             {
-                // Some providers finish with only the answer after streaming a separate trace.
-                // Keep that trace at its original position so the open disclosure remains stable.
-                if !streaming
-                    && !blocks
-                        .iter()
-                        .any(|block| matches!(block, AssistantBlock::Thinking(_)))
-                {
-                    for (index, block) in existing_blocks.drain(..).enumerate() {
-                        if matches!(block, AssistantBlock::Thinking(_)) {
-                            blocks.insert(index.min(blocks.len()), block);
-                        }
-                    }
-                }
                 *existing_blocks = blocks;
                 *existing_stream = streaming;
                 if model_label.is_some() {
@@ -963,18 +1254,25 @@ impl AttachedSessionState {
                 if error.is_some() {
                     *existing_err = error;
                 }
-            } else {
-                let key = self.mint_key("asst");
-                self.entries.push(TranscriptEntry::Assistant {
-                    key,
-                    blocks,
-                    streaming,
-                    model_label,
-                    error,
-                });
             }
+        } else if !blocks.is_empty() || error.is_some() {
+            if blocks
+                .iter()
+                .any(|b| matches!(b, AssistantBlock::Thinking(tb) if tb.streaming))
+                && self.thinking_started_at.is_none()
+            {
+                self.thinking_started_at = now;
+            }
+            let key = self.mint_key("asst");
+            self.entries.push(TranscriptEntry::Assistant {
+                key,
+                blocks,
+                streaming,
+                model_label,
+                error,
+            });
         } else if !streaming {
-            self.finish_streaming_assistant();
+            self.finish_streaming_assistant(now);
         }
 
         for (id, name, args) in tool_calls {
@@ -1434,10 +1732,104 @@ fn parse_python_details(details: &Value, fallback_text: &str) -> PythonCellDetai
     }
 }
 
+fn is_fence_marker(trimmed: &str) -> bool {
+    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+}
+
+fn extract_step_heading(trimmed_line: &str, allow_unclosed_tail: bool) -> Option<String> {
+    if let Some(rest) = trimmed_line.strip_prefix('#') {
+        let heading = strip_inline_markdown(rest.trim_start_matches('#').trim());
+        return (!heading.is_empty()).then_some(heading);
+    }
+    if let Some(rest) = trimmed_line.strip_prefix("**") {
+        if let Some(end) = rest.find("**") {
+            let title = rest[..end].trim();
+            let after = rest[end + 2..].trim();
+            if !title.is_empty()
+                && (after.is_empty()
+                    || after.starts_with(':')
+                    || after.starts_with('—')
+                    || after.starts_with('-'))
+            {
+                let cleaned = strip_inline_markdown(title);
+                if !cleaned.is_empty() {
+                    return Some(cleaned);
+                }
+            }
+        } else if allow_unclosed_tail {
+            let title = strip_inline_markdown(rest.trim_end_matches('*').trim());
+            if !title.is_empty() {
+                return Some(title);
+            }
+        }
+    }
+    None
+}
+
+fn strip_inline_markdown(line: &str) -> String {
+    let mut s = line.trim();
+    if s.starts_with('#') {
+        s = s.trim_start_matches('#').trim_start();
+    }
+    while let Some(rest) = s.strip_prefix('>') {
+        s = rest.trim_start();
+    }
+    if let Some(rest) = s
+        .strip_prefix("- ")
+        .or_else(|| s.strip_prefix("* "))
+        .or_else(|| s.strip_prefix("+ "))
+    {
+        s = rest.trim_start();
+    } else if let Some((digits, rest)) = s.split_once(". ")
+        && !digits.is_empty()
+        && digits.bytes().all(|b| b.is_ascii_digit())
+    {
+        s = rest.trim_start();
+    }
+
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(ch) = rest.chars().next() {
+        let ch_len = ch.len_utf8();
+        if ch == '\\' {
+            rest = &rest[ch_len..];
+            if let Some(escaped) = rest.chars().next() {
+                out.push(escaped);
+                rest = &rest[escaped.len_utf8()..];
+            }
+            continue;
+        }
+        if ch == '['
+            && let Some(close_bracket) = rest[1..].find("](")
+        {
+            let label = &rest[1..=close_bracket];
+            out.push_str(&strip_inline_markdown(label));
+            let after_open_paren = &rest[close_bracket + 3..];
+            rest = after_open_paren
+                .find(')')
+                .map_or("", |close_paren| &after_open_paren[close_paren + 1..]);
+            continue;
+        }
+        rest = &rest[ch_len..];
+        if matches!(ch, '*' | '`' | '~') {
+            continue;
+        }
+        if ch.is_whitespace() {
+            if !out.ends_with(' ') && !out.is_empty() {
+                out.push(' ');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out.trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::time::Duration;
 
     #[test]
     fn completed_answer_keeps_the_open_streamed_thinking_trace() {
@@ -1467,9 +1859,172 @@ mod tests {
         assert_eq!(
             blocks,
             &[
-                AssistantBlock::Thinking("Reading **files**".into()),
+                AssistantBlock::Thinking(ThinkingBlock::plain("Reading **files**")),
                 AssistantBlock::Text("Found it".into())
             ]
+        );
+    }
+
+    #[test]
+    fn thinking_settles_on_text_start_with_duration_and_preserves_tool_only_traces() {
+        let t0 = Instant::now();
+        let mut session = AttachedSessionState::default();
+
+        // 1. Responses-style empty ThinkingStart shows a live thinking block immediately.
+        session.apply_live_event_at(
+            &json!({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "thinking_start"},
+                "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}]}
+            }),
+            t0,
+        );
+        let TranscriptEntry::Assistant { blocks, .. } = &session.entries[0] else {
+            panic!("expected assistant entry");
+        };
+        assert_eq!(
+            blocks,
+            &[AssistantBlock::Thinking(ThinkingBlock {
+                text: String::new(),
+                streaming: true,
+                redacted: false,
+                duration_ms: None,
+            })]
+        );
+
+        // 2. Streaming step headings update headline and live preview cleanly without raw `**`.
+        session.apply_live_event_at(
+            &json!({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "thinking_delta"},
+                "message": {"role": "assistant", "content": [{
+                    "type": "thinking",
+                    "thinking": "**Inspecting workspace**\n\nChecking `stage.rs` layout.\n\n**Refining toast"
+                }]}
+            }),
+            t0 + Duration::from_millis(900),
+        );
+        let TranscriptEntry::Assistant { blocks, .. } = &session.entries[0] else {
+            panic!("expected assistant entry");
+        };
+        let AssistantBlock::Thinking(live_tb) = &blocks[0] else {
+            panic!("expected thinking block");
+        };
+        assert!(live_tb.streaming);
+        assert_eq!(live_tb.headline().as_deref(), Some("Refining toast"));
+        assert_eq!(
+            live_tb.live_preview_lines(2),
+            vec!["Checking stage.rs layout."]
+        );
+
+        // 3. When TextStart arrives, the thinking block settles immediately (before message_end)
+        //    and records elapsed duration.
+        session.apply_live_event_at(
+            &json!({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "text_start"},
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "**Inspecting workspace**\n\nChecking `stage.rs` layout.\n\n"},
+                    {"type": "text", "text": "Here "}
+                ]}
+            }),
+            t0 + Duration::from_millis(2_700),
+        );
+        let TranscriptEntry::Assistant {
+            blocks, streaming, ..
+        } = &session.entries[0]
+        else {
+            panic!("expected assistant entry");
+        };
+        assert!(*streaming);
+        let AssistantBlock::Thinking(settled_tb) = &blocks[0] else {
+            panic!("expected thinking block");
+        };
+        assert!(!settled_tb.streaming);
+        assert_eq!(settled_tb.formatted_duration().as_deref(), Some("3s"));
+        assert_eq!(
+            settled_tb.headline().as_deref(),
+            Some("Inspecting workspace")
+        );
+        assert_eq!(
+            settled_tb.text,
+            "**Inspecting workspace**\n\nChecking `stage.rs` layout."
+        );
+
+        session.apply_live_event_at(
+            &json!({
+                "type": "message_end",
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "**Inspecting workspace**\n\nChecking `stage.rs` layout.\n\n"},
+                    {"type": "text", "text": "Here is the fix."}
+                ]}
+            }),
+            t0 + Duration::from_millis(3_500),
+        );
+
+        // 4. Next step streams thinking and finishes with ONLY a toolCall (omitting thinking):
+        //    the streamed thinking trace must be preserved!
+        let mut tool_session = AttachedSessionState::default();
+        tool_session.apply_live_event_at(
+            &json!({
+                "type": "message_update",
+                "message": {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "**Running verification**\n\nExecuting test suite."}
+                ]}
+            }),
+            t0,
+        );
+        tool_session.apply_live_event_at(
+            &json!({
+                "type": "message_end",
+                "message": {"role": "assistant", "content": [
+                    {"type": "toolCall", "id": "tc-9", "name": "python_repl", "arguments": {"code": "1 + 1"}}
+                ]}
+            }),
+            t0 + Duration::from_millis(1_600),
+        );
+        assert_eq!(tool_session.entries.len(), 2);
+        let TranscriptEntry::Assistant {
+            blocks, streaming, ..
+        } = &tool_session.entries[0]
+        else {
+            panic!("expected preserved assistant thinking entry");
+        };
+        assert!(!streaming);
+        assert_eq!(
+            blocks,
+            &[AssistantBlock::Thinking(ThinkingBlock {
+                text: "**Running verification**\n\nExecuting test suite.".into(),
+                streaming: false,
+                redacted: false,
+                duration_ms: Some(1_600),
+            })]
+        );
+        assert!(matches!(&tool_session.entries[1], TranscriptEntry::Tool(c) if c.id == "tc-9"));
+
+        // 5. Silent ThinkingStart ("") followed by toolCall-only message_end leaves no ghost row.
+        let mut silent_session = AttachedSessionState::default();
+        silent_session.apply_live_event_at(
+            &json!({
+                "type": "message_update",
+                "assistantMessageEvent": {"type": "thinking_start"},
+                "message": {"role": "assistant", "content": [{"type": "thinking", "thinking": ""}]}
+            }),
+            t0,
+        );
+        assert_eq!(silent_session.entries.len(), 1);
+        silent_session.apply_live_event_at(
+            &json!({
+                "type": "message_end",
+                "message": {"role": "assistant", "content": [
+                    {"type": "toolCall", "id": "tc-silent", "name": "python_repl", "arguments": {"code": "2 + 2"}}
+                ]}
+            }),
+            t0 + Duration::from_millis(1_200),
+        );
+        assert_eq!(silent_session.entries.len(), 1);
+        assert!(
+            matches!(&silent_session.entries[0], TranscriptEntry::Tool(c) if c.id == "tc-silent")
         );
     }
 
@@ -1674,5 +2229,51 @@ mod tests {
                 ("root", "queued")
             ]
         );
+    }
+
+    #[test]
+    fn queued_preparing_and_steering_clear_as_live_events_progress() {
+        let mut session = AttachedSessionState::default();
+        session.apply_state_object(&json!({
+            "sessionActions": {
+                "steering": ["Focus on stage.rs"],
+                "followUps": ["Run make check"],
+                "active": {
+                    "kind": "turn",
+                    "phase": "preparing",
+                    "label": "Preparing next turn…"
+                }
+            }
+        }));
+        assert_eq!(session.queued.steering, ["Focus on stage.rs"]);
+        assert_eq!(session.queued.follow_ups, ["Run make check"]);
+        assert_eq!(
+            session.queued.preparing.as_deref(),
+            Some("Preparing next turn…")
+        );
+
+        session.apply_live_event(&json!({
+            "type": "message_start",
+            "message": {
+                "role": "user",
+                "content": "Focus on stage.rs"
+            }
+        }));
+        assert!(session.queued.preparing.is_none());
+        assert_eq!(session.queued.steering, [] as [String; 0]);
+        assert_eq!(session.queued.follow_ups, ["Run make check"]);
+
+        session.queued.preparing = Some("Still preparing".to_string());
+        session.apply_live_event(&json!({ "type": "agent_end" }));
+        assert!(session.queued.preparing.is_none());
+
+        session.apply_live_event(&json!({
+            "type": "message_start",
+            "message": {
+                "role": "user",
+                "content": "Run make check"
+            }
+        }));
+        assert!(session.queued.is_empty());
     }
 }

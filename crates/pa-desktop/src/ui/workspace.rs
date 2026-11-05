@@ -5,8 +5,10 @@ mod cli_data;
 mod interactions;
 mod panel_motion;
 mod projects;
+pub mod toast;
 use crate::state::{DraftKey, subagents::Subagents};
 use panel_motion::SIDEBAR_BREAKPOINT;
+pub use toast::{Toast, ToastKind, ToastTopic};
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read as _;
@@ -15,9 +17,8 @@ use std::path::{Path, PathBuf};
 use base64::Engine as _;
 use futures::StreamExt as _;
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, FontWeight, IntoElement, KeyBinding, Menu,
-    MenuItem, PathPromptOptions, Render, ScrollHandle, SystemMenuType, Window, actions, div,
-    prelude::*, px,
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, KeyBinding, Menu, MenuItem,
+    PathPromptOptions, Render, ScrollHandle, SystemMenuType, Window, actions, div, prelude::*, px,
 };
 use pa_core::refinement::{HarnessScope, RefinementKind};
 
@@ -175,7 +176,8 @@ pub struct PrimeDesktopView {
     pub daemon_connected: bool,
     pub daemon_socket_display: String,
     pub daemon_version: Option<String>,
-    pub toast: Option<(String, bool)>,
+    pub toast: Option<Toast>,
+    toast_ctl: toast::ToastController,
 
     pub active_sessions: Vec<ActiveSessionRow>,
     pub saved_sessions: Vec<SavedSessionRow>,
@@ -215,6 +217,7 @@ pub struct PrimeDesktopView {
     pub active_modal: Option<ActiveModal>,
     pub(super) modal_selected_idx: usize,
     pub(super) slash_selected_idx: usize,
+    pub(super) dismissed_slash_draft: Option<String>,
     pub(super) modal_scroll: ScrollHandle,
     pub(super) settings_motion_focus: FocusHandle,
     pub renaming_session: bool,
@@ -375,6 +378,7 @@ impl PrimeDesktopView {
             daemon_socket_display: sock_path.to_string_lossy().to_string(),
             daemon_version: None,
             toast: None,
+            toast_ctl: toast::ToastController::default(),
             active_sessions: Vec::new(),
             saved_sessions: Vec::new(),
             saved_next_cursor: None,
@@ -407,6 +411,7 @@ impl PrimeDesktopView {
             active_modal: options.initial_modal,
             modal_selected_idx: 0,
             slash_selected_idx: 0,
+            dismissed_slash_draft: None,
             modal_scroll: ScrollHandle::new(),
             settings_motion_focus: cx.focus_handle(),
             renaming_session: false,
@@ -473,7 +478,7 @@ impl PrimeDesktopView {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn apply_bridge_event(&mut self, event: BridgeEvent, cx: &mut Context<Self>) {
+    pub(in crate::ui) fn apply_bridge_event(&mut self, event: BridgeEvent, cx: &mut Context<Self>) {
         match event {
             BridgeEvent::ConnectionStatus {
                 connected,
@@ -496,7 +501,9 @@ impl PrimeDesktopView {
                 self.daemon_socket_display = socket_path.to_string_lossy().to_string();
                 self.daemon_version = daemon_version;
                 if let Some(err) = error {
-                    self.toast = Some((err, true));
+                    self.show_topic_toast(err, ToastKind::Error, ToastTopic::Connection, cx);
+                } else if connected {
+                    self.clear_toast_topic(ToastTopic::Connection, cx);
                 }
             }
             BridgeEvent::ActiveSessions(rows) => {
@@ -572,7 +579,8 @@ impl PrimeDesktopView {
             BridgeEvent::SessionTransitionFailed { message } => {
                 self.selection = SessionSelection::Idle;
                 self.restore_draft(cx);
-                self.toast = Some((message, true));
+                self.clear_toast_topic(ToastTopic::SessionOpening, cx);
+                self.show_toast(message, true, cx);
             }
             BridgeEvent::PromptRejected {
                 draft,
@@ -585,7 +593,7 @@ impl PrimeDesktopView {
                     .or_default()
                     .push_back((message, images));
                 self.restore_draft(cx);
-                self.toast = Some((reason, true));
+                self.show_toast(reason, true, cx);
             }
             BridgeEvent::SessionAttached {
                 active_session_id,
@@ -602,6 +610,7 @@ impl PrimeDesktopView {
                     self.reset_session(cx);
                 }
                 self.selection = SessionSelection::Idle;
+                self.clear_toast_topic(ToastTopic::SessionOpening, cx);
                 if let Some(state_val) = snapshot.get("state") {
                     self.telemetry.update_from_state(state_val);
                 }
@@ -611,8 +620,10 @@ impl PrimeDesktopView {
                     self.remember_project();
                 }
                 if newly_attached {
-                    self.bridge
-                        .send(BridgeRequest::RefreshInspector { active_session_id });
+                    if self.daemon_connected {
+                        self.bridge
+                            .send(BridgeRequest::RefreshInspector { active_session_id });
+                    }
                     self.reload_local_stores(cx);
                     self.restore_draft(cx);
                 }
@@ -649,12 +660,15 @@ impl PrimeDesktopView {
                 if self.session.active_session_id == active_session_id {
                     self.session.finish_chunked_snapshot();
                     self.selection = SessionSelection::Idle;
+                    self.clear_toast_topic(ToastTopic::SessionOpening, cx);
                     if !self.session.cwd.is_empty() {
                         self.working_cwd.clone_from(&self.session.cwd);
                         self.remember_project();
                     }
-                    self.bridge
-                        .send(BridgeRequest::RefreshInspector { active_session_id });
+                    if self.daemon_connected {
+                        self.bridge
+                            .send(BridgeRequest::RefreshInspector { active_session_id });
+                    }
                     self.restore_draft(cx);
                     self.reload_local_stores(cx);
                     self.follow_tail = true;
@@ -678,11 +692,27 @@ impl PrimeDesktopView {
                             .and_then(serde_json::Value::as_str)
                             .unwrap_or_default()
                             .to_string();
-                        self.session.apply_live_event(&event);
+                        self.session
+                            .apply_live_event_at(&event, cx.background_executor().now());
+                        if matches!(etype.as_str(), "compaction_start" | "compaction_end") {
+                            self.clear_toast_topic(ToastTopic::Compaction, cx);
+                        }
+                        if matches!(etype.as_str(), "turn_end" | "agent_end")
+                            || (etype == "message_start"
+                                && event
+                                    .get("message")
+                                    .and_then(|m| m.get("role"))
+                                    .and_then(serde_json::Value::as_str)
+                                    == Some("custom"))
+                        {
+                            self.clear_toast_topic(ToastTopic::Refinement, cx);
+                        }
                         if matches!(etype.as_str(), "turn_end" | "agent_end" | "compaction_end") {
                             self.reload_local_stores(cx);
-                            self.bridge
-                                .send(BridgeRequest::RefreshInspector { active_session_id });
+                            if self.daemon_connected {
+                                self.bridge
+                                    .send(BridgeRequest::RefreshInspector { active_session_id });
+                            }
                         }
                     }
                 }
@@ -714,7 +744,7 @@ impl PrimeDesktopView {
                     self.reset_session(cx);
                     self.restore_draft(cx);
                     self.selection = SessionSelection::Idle;
-                    self.toast = Some((format!("Session closed ({reason})"), false));
+                    self.show_toast(format!("Session closed ({reason})"), false, cx);
                 }
             }
             BridgeEvent::ModelCatalogLoaded {
@@ -782,14 +812,14 @@ impl PrimeDesktopView {
                 }
             }
             BridgeEvent::BackgroundRefreshNeeded => {
-                if !self.session.active_session_id.is_empty() {
+                if self.daemon_connected && !self.session.active_session_id.is_empty() {
                     self.bridge.send(BridgeRequest::RefreshInspector {
                         active_session_id: self.session.active_session_id.clone(),
                     });
                 }
             }
             BridgeEvent::Toast { message, is_error } => {
-                self.toast = Some((message, is_error));
+                self.show_toast(message, is_error, cx);
             }
         }
         cx.notify();
@@ -838,6 +868,7 @@ impl PrimeDesktopView {
         self.agent_mail_target = None;
         self.harness_editor_open = false;
         self.harness_editing_id = None;
+        self.dismissed_slash_draft = None;
         self.store_request += 1;
         self.harness.local_dir = None;
         self.harness.local_entries.clear();
@@ -876,16 +907,25 @@ impl PrimeDesktopView {
     }
 
     fn ready_for_request(&mut self, cx: &mut Context<Self>) -> bool {
-        let error = if !self.daemon_connected {
-            "Not connected. Use Refresh to reconnect."
-        } else if !matches!(self.selection, SessionSelection::Idle) {
-            "Opening the session. Wait before sending another request."
-        } else {
-            return true;
-        };
-        self.toast = Some((error.to_owned(), true));
-        cx.notify();
-        false
+        if !self.daemon_connected {
+            self.show_topic_toast(
+                "Not connected. Use Refresh to reconnect.",
+                ToastKind::Error,
+                ToastTopic::Connection,
+                cx,
+            );
+            return false;
+        }
+        if !matches!(self.selection, SessionSelection::Idle) {
+            self.show_topic_toast(
+                "Opening the session. Wait before sending another request.",
+                ToastKind::Info,
+                ToastTopic::SessionOpening,
+                cx,
+            );
+            return false;
+        }
+        true
     }
 
     pub fn populate_draft(&mut self, prompt: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -928,8 +968,7 @@ impl PrimeDesktopView {
             None
         };
         if let Some(message) = error {
-            self.toast = Some((message.to_owned(), true));
-            cx.notify();
+            self.show_toast(message, true, cx);
             return;
         }
 
@@ -944,8 +983,12 @@ impl PrimeDesktopView {
         if btw {
             let q = trimmed.trim_start_matches("/btw").trim().to_owned();
             self.session.side_question.open = true;
-            if !q.is_empty() && !self.session.active_session_id.is_empty() {
+            if q.is_empty() {
+                window.focus(&self.side_question_input.focus_handle(cx));
+            } else if !self.session.active_session_id.is_empty() {
                 self.session.side_question.question.clone_from(&q);
+                self.session.side_question.answer.clear();
+                self.session.side_question.error = None;
                 self.bridge.send(BridgeRequest::StartSideQuestion {
                     active_session_id: self.session.active_session_id.clone(),
                     question: q,
@@ -1056,11 +1099,11 @@ impl PrimeDesktopView {
             return;
         }
         if !self.staged_images.is_empty() {
-            self.toast = Some((
-                "Remove attachments before steering or queuing a follow-up.".to_owned(),
+            self.show_toast(
+                "Remove attachments before steering or queuing a follow-up.",
                 true,
-            ));
-            cx.notify();
+                cx,
+            );
             return;
         }
         let msg = self.composer_input.read(cx).text().trim().to_owned();
@@ -1068,11 +1111,7 @@ impl PrimeDesktopView {
             return;
         }
         if msg.len() > MAX_PROMPT_BYTES {
-            self.toast = Some((
-                "Prompt exceeds 1 MiB. Shorten it before sending.".to_owned(),
-                true,
-            ));
-            cx.notify();
+            self.show_toast("Prompt exceeds 1 MiB. Shorten it before sending.", true, cx);
             return;
         }
         self.follow_tail = true;
@@ -1134,17 +1173,20 @@ impl PrimeDesktopView {
 
     fn save_preferences(&mut self) {
         if let Err(err) = self.prefs.save(&self.preferences_dir) {
-            self.toast = Some((format!("Cannot save desktop preferences: {err}"), true));
+            self.record_toast_without_cx(
+                format!("Cannot save desktop preferences: {err}"),
+                ToastKind::Error,
+            );
         }
     }
 
     pub fn switch_daemon_target(&mut self, cx: &mut Context<Self>) {
         if self.prefs.cli_data_dir.is_some() {
-            self.toast = Some((
-                "Use the default data folder before attaching to the CLI daemon.".into(),
+            self.show_toast(
+                "Use the default data folder before attaching to the CLI daemon.",
                 true,
-            ));
-            cx.notify();
+                cx,
+            );
             return;
         }
         self.prefs.daemon_target = self.prefs.daemon_target.toggled();
@@ -1202,6 +1244,7 @@ impl PrimeDesktopView {
             );
         }
         if modal == ActiveModal::ModelPicker
+            && self.daemon_connected
             && self.catalog_models.is_empty()
             && !self.session.active_session_id.is_empty()
         {
@@ -1315,6 +1358,7 @@ impl PrimeDesktopView {
         }
         self.session.side_question.question.clone_from(&q);
         self.session.side_question.answer.clear();
+        self.session.side_question.error = None;
         self.bridge.send(BridgeRequest::StartSideQuestion {
             active_session_id: self.session.active_session_id.clone(),
             question: q,
@@ -1329,8 +1373,12 @@ impl PrimeDesktopView {
                 active_session_id: self.session.active_session_id.clone(),
                 instructions: None,
             });
-            self.toast = Some(("Compacting session context…".to_string(), false));
-            cx.notify();
+            self.show_topic_toast(
+                "Compacting session context…",
+                ToastKind::Progress,
+                ToastTopic::Compaction,
+                cx,
+            );
         }
     }
 
@@ -1371,8 +1419,7 @@ impl PrimeDesktopView {
         let title = self.harness_title_input.read(cx).text().trim().to_string();
         let body = self.harness_body_input.read(cx).text().trim().to_string();
         if title.is_empty() || body.is_empty() {
-            self.toast = Some(("Entry title and content are required".to_string(), true));
-            cx.notify();
+            self.show_toast("Entry title and content are required", true, cx);
             return;
         }
         match upsert_harness_entry(
@@ -1391,13 +1438,12 @@ impl PrimeDesktopView {
             Ok(_) => {
                 self.close_harness_editor(window, cx);
                 self.reload_local_stores(cx);
-                self.toast = Some(("Saved continual harness entry".to_string(), false));
+                self.show_toast("Saved continual harness entry", false, cx);
             }
             Err(err) => {
-                self.toast = Some((format!("{err:#}"), true));
+                self.show_toast(format!("{err:#}"), true, cx);
             }
         }
-        cx.notify();
     }
 
     pub fn remove_harness_entry(&mut self, kind: RefinementKind, id: &str, cx: &mut Context<Self>) {
@@ -1411,13 +1457,12 @@ impl PrimeDesktopView {
         ) {
             Ok(_) => {
                 self.reload_local_stores(cx);
-                self.toast = Some((format!("Deleted `{id}`"), false));
+                self.show_toast(format!("Deleted `{id}`"), false, cx);
             }
             Err(err) => {
-                self.toast = Some((format!("{err:#}"), true));
+                self.show_toast(format!("{err:#}"), true, cx);
             }
         }
-        cx.notify();
     }
 
     pub fn save_selected_provider_key(&mut self, cx: &mut Context<Self>) {
@@ -1448,15 +1493,24 @@ impl PrimeDesktopView {
             let _ = this.update(cx, |view, cx| {
                 view.auth_write_pending = false;
                 view.reload_local_stores(cx);
-                if ok && !view.session.active_session_id.is_empty() {
-                    view.bridge.send(BridgeRequest::RefreshInspector { active_session_id: view.session.active_session_id.clone() });
+                if ok && view.daemon_connected && !view.session.active_session_id.is_empty() {
+                    view.bridge.send(BridgeRequest::RefreshInspector {
+                        active_session_id: view.session.active_session_id.clone(),
+                    });
                 }
-                let message = if !ok { format!("Could not update the CLI credential for {provider}. Its file may be unreadable or the record may have changed.") }
-                    else if removing { format!("Removed the stored key for {provider}.") } else { format!("Saved the key for {provider}.") };
-                view.toast = Some((message, !ok));
-                cx.notify();
+                let message = if !ok {
+                    format!(
+                        "Could not update the CLI credential for {provider}. Its file may be unreadable or the record may have changed."
+                    )
+                } else if removing {
+                    format!("Removed the stored key for {provider}.")
+                } else {
+                    format!("Saved the key for {provider}.")
+                };
+                view.show_toast(message, !ok, cx);
             });
-        }).detach();
+        })
+        .detach();
         cx.notify();
     }
 
@@ -1506,16 +1560,13 @@ impl PrimeDesktopView {
                                 <= MAX_ATTACHMENT_BYTES =>
                     {
                         view.staged_images.extend(images);
+                        cx.notify();
                     }
                     Ok(_) => {
-                        view.toast = Some((
-                            "Attachments exceed the limit for one prompt.".to_owned(),
-                            true,
-                        ));
+                        view.show_toast("Attachments exceed the limit for one prompt.", true, cx);
                     }
-                    Err(error) => view.toast = Some((error.to_string(), true)),
+                    Err(error) => view.show_toast(error.to_string(), true, cx),
                 }
-                cx.notify();
             });
         })
         .detach();
@@ -1664,49 +1715,11 @@ impl Render for PrimeDesktopView {
             .when_some(self.active_modal, |d, modal| {
                 d.child(render_active_modal(modal, self, palette, cx))
             })
-            // Toast Notification Pill (bottom-right)
-            .when_some(self.toast.clone(), |d, (msg, is_err)| {
-                d.child(
-                    div()
-                        .id("toast-banner")
-                        .occlude()
-                        .min_w_0()
-                        .absolute()
-                        .bottom(px(22.0))
-                        .right(px(22.0))
-                        .max_w(px(420.0))
-                        .px(px(14.0))
-                        .py(px(9.0))
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(if is_err {
-                            palette.danger
-                        } else {
-                            palette.border_strong
-                        })
-                        .bg(palette.bg_elevated)
-                        .shadow_lg()
-                        .cursor_pointer()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.toast = None;
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(if is_err {
-                                    palette.danger
-                                } else {
-                                    palette.text_primary
-                                })
-                                .child(msg),
-                        ),
-                )
-            })
+            // Toast Notification Pill (stage-aware, auto-dismissing)
+            .when_some(
+                self.render_toast_overlay(window, palette, cx),
+                gpui::ParentElement::child,
+            )
     }
 }
 

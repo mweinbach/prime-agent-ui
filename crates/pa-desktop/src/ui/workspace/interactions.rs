@@ -125,6 +125,7 @@ impl PrimeDesktopView {
         )
         .detach();
         cx.subscribe(&self.composer_input, |view, input, _: &TextChanged, cx| {
+            let current = input.read(cx).text().to_owned();
             input.update(cx, |input, _| {
                 input.set_font_family(if input.text().starts_with('!') {
                     font_mono()
@@ -132,6 +133,9 @@ impl PrimeDesktopView {
                     font_sans()
                 });
             });
+            if view.dismissed_slash_draft.as_deref() != Some(current.as_str()) {
+                view.dismissed_slash_draft = None;
+            }
             view.slash_selected_idx = 0;
             cx.notify();
         })
@@ -148,15 +152,39 @@ impl PrimeDesktopView {
         }
     }
 
+    pub(in crate::ui) fn visible_slash_matches(
+        &self,
+        cx: &gpui::App,
+    ) -> Vec<(&'static str, &'static str)> {
+        let draft = self.composer_input.read(cx).text();
+        if self.dismissed_slash_draft.as_deref() == Some(draft) {
+            return Vec::new();
+        }
+        slash_matches(draft)
+    }
+
+    pub(in crate::ui) fn dismiss_slash_menu(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.visible_slash_matches(cx).is_empty() {
+            return false;
+        }
+        let draft = self.composer_input.read(cx).text().to_owned();
+        self.dismissed_slash_draft = Some(draft);
+        self.slash_selected_idx = 0;
+        cx.notify();
+        true
+    }
+
     pub(in crate::ui) fn complete_slash(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> bool {
-        let matches = slash_matches(self.composer_input.read(cx).text());
-        let Some(&(command, _)) = matches.get(self.slash_selected_idx) else {
+        let matches = self.visible_slash_matches(cx);
+        let idx = self.slash_selected_idx.min(matches.len().saturating_sub(1));
+        let Some(&(command, _)) = matches.get(idx) else {
             return false;
         };
+        self.dismissed_slash_draft = None;
         self.populate_draft(command, window, cx);
         true
     }
@@ -203,8 +231,7 @@ impl PrimeDesktopView {
         cx: &mut Context<Self>,
     ) -> bool {
         if self.session.active_session_id.is_empty() {
-            self.toast = Some(("Open a session before starting a refinement.".into(), true));
-            cx.notify();
+            self.show_toast("Open a session before starting a refinement.", true, cx);
             return false;
         }
         self.bridge.send(BridgeRequest::Refine {
@@ -213,8 +240,12 @@ impl PrimeDesktopView {
             rollback_id: None,
             global,
         });
-        self.toast = Some(("Running Continual Harness refinement…".into(), false));
-        cx.notify();
+        self.show_topic_toast(
+            "Running Continual Harness refinement…",
+            super::ToastKind::Progress,
+            super::ToastTopic::Refinement,
+            cx,
+        );
         true
     }
 
@@ -279,25 +310,47 @@ impl PrimeDesktopView {
         let width = window.viewport_size().width;
         if self.active_modal.is_some() {
             self.close_modal(window, cx);
-        } else if self.prefs.inspector_open && width < px(INSPECTOR_BREAKPOINT) {
-            self.toggle_inspector(window, cx);
-        } else if self.prefs.sidebar_open && width < px(SIDEBAR_BREAKPOINT) {
-            self.toggle_sidebar(window, cx);
-        } else if self.renaming_session {
+            return;
+        }
+        if self.renaming_session {
             self.renaming_session = false;
             window.focus(&self.composer_input.focus_handle(cx));
             cx.notify();
-        } else if self.agent_mail_target.is_some() {
+            return;
+        }
+        if self.composer_input.focus_handle(cx).is_focused(window) && self.dismiss_slash_menu(cx) {
+            return;
+        }
+        if self.prefs.inspector_open && width < px(INSPECTOR_BREAKPOINT) {
+            self.toggle_inspector(window, cx);
+            return;
+        }
+        if self.prefs.sidebar_open && width < px(SIDEBAR_BREAKPOINT) {
+            self.toggle_sidebar(window, cx);
+            return;
+        }
+        if self.dismiss_slash_menu(cx) {
+            return;
+        }
+        if self.agent_mail_target.is_some() {
             self.close_mail(window, cx);
-        } else if self.harness_editor_open {
+            return;
+        }
+        if self.harness_editor_open {
             self.close_harness_editor(window, cx);
-        } else if self.session.side_question.open {
+            return;
+        }
+        if self.session.side_question.open {
             self.toggle_side_question(window, cx);
-        } else if self.session.is_streaming && !self.session.active_session_id.is_empty() {
+            return;
+        }
+        if self.session.is_streaming && !self.session.active_session_id.is_empty() {
             self.bridge.send(BridgeRequest::AbortSession {
                 active_session_id: self.session.active_session_id.clone(),
             });
-        } else if self
+            return;
+        }
+        if self
             .sidebar_search_input
             .focus_handle(cx)
             .is_focused(window)
@@ -307,6 +360,10 @@ impl PrimeDesktopView {
             } else {
                 self.sidebar_search_input.update(cx, TextInput::clear);
             }
+            return;
+        }
+        if self.toast.is_some() {
+            self.dismiss_toast(cx);
         }
     }
 
@@ -513,6 +570,203 @@ mod tests {
         view.update_in(cx, |view, window, cx| {
             assert!(!view.session.side_question.open && view.session.is_streaming);
             assert!(view.composer_input.focus_handle(cx).is_focused(window));
+        });
+        app.quit();
+    }
+
+    #[test]
+    fn toasts_auto_dismiss_pause_on_hover_and_close_via_x_without_covering_controls() {
+        let profile = TempDir::new().unwrap();
+        let mut app = TestAppContext::single();
+        let (view, cx) = workspace(&mut app, &profile);
+        cx.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(720.0)));
+        cx.update(|window, cx| window.draw(cx).clear());
+
+        let banner = cx.debug_bounds("toast-banner").expect("toast banner");
+        let close_btn = cx.debug_bounds("toast-close-btn").expect("toast close x");
+        let send_btn = cx
+            .debug_bounds("composer-send-btn")
+            .expect("composer send button");
+        assert!(
+            !banner.intersects(&send_btn),
+            "toast banner must never cover composer send button"
+        );
+        assert!(banner.intersects(&close_btn));
+
+        // Hovering pauses the auto-dismiss countdown.
+        cx.simulate_mouse_move(banner.center(), None, gpui::Modifiers::none());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(10));
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, _| assert!(view.toast.is_some()));
+
+        // Moving away resumes countdown and auto-dismisses cleanly (including exit fade).
+        cx.simulate_mouse_move(
+            gpui::point(gpui::px(24.0), gpui::px(24.0)),
+            None,
+            gpui::Modifiers::none(),
+        );
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(8));
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, _| assert!(view.toast.is_none()));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, _| assert!(!view.is_toast_mounted()));
+
+        // Connection topic toast clears immediately when daemon reconnects.
+        view.update_in(cx, |view, _, cx| {
+            let target = view.prefs.daemon_target;
+            view.apply_bridge_event(
+                crate::bridge::BridgeEvent::ConnectionStatus {
+                    connected: false,
+                    target,
+                    socket_path: profile.path().join("isolated.sock"),
+                    daemon_version: None,
+                    error: Some("Daemon offline".into()),
+                },
+                cx,
+            );
+            assert!(view.toast.is_some());
+            view.apply_bridge_event(
+                crate::bridge::BridgeEvent::ConnectionStatus {
+                    connected: true,
+                    target,
+                    socket_path: profile.path().join("isolated.sock"),
+                    daemon_version: Some("0.1.0".into()),
+                    error: None,
+                },
+                cx,
+            );
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, _| assert!(!view.is_toast_mounted()));
+
+        // Explicit close `×` button dismisses immediately.
+        view.update_in(cx, |view, _, cx| {
+            view.show_toast("Switched model to openai-codex/aurora-alpha", false, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let close_btn = cx.debug_bounds("toast-close-btn").expect("toast close x");
+        cx.simulate_click(close_btn.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, _| assert!(view.toast.is_none()));
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(300));
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, _| assert!(!view.is_toast_mounted()));
+        app.quit();
+    }
+
+    #[test]
+    fn popup_close_buttons_queued_strip_and_slash_escape_handle_edge_cases_cleanly() {
+        let profile = TempDir::new().unwrap();
+        let mut app = TestAppContext::single();
+        let (view, cx) = workspace(&mut app, &profile);
+        cx.simulate_resize(gpui::size(gpui::px(1100.0), gpui::px(720.0)));
+
+        // Dismiss initial connection toast so Escape tests slash menu directly.
+        view.update_in(cx, |view, window, cx| {
+            view.dismiss_toast(cx);
+            view.session.active_session_id = "s-live".into();
+            view.session.is_streaming = true;
+            view.populate_draft("/co", window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("slash-popover").is_some());
+        view.read_with(cx, |view, cx| {
+            assert_ne!(view.visible_slash_matches(cx), [] as [(&str, &str); 0]);
+        });
+
+        // Escape dismisses slash menu without clearing "/co" or aborting the running turn.
+        cx.simulate_keystrokes("escape");
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.visible_slash_matches(cx), [] as [(&str, &str); 0]);
+            assert_eq!(view.composer_input.read(cx).text(), "/co");
+            assert!(view.session.is_streaming);
+        });
+
+        // Typing re-opens the slash popover; clicking its `×` closes it cleanly.
+        cx.simulate_keystrokes("m");
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, cx| {
+            assert_ne!(view.visible_slash_matches(cx), [] as [(&str, &str); 0]);
+        });
+        let slash_close = cx
+            .debug_bounds("slash-popover-close")
+            .expect("slash close button");
+        cx.simulate_click(slash_close.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, cx| {
+            assert_eq!(view.visible_slash_matches(cx), [] as [(&str, &str); 0]);
+            assert_eq!(view.composer_input.read(cx).text(), "/com");
+        });
+
+        // Preparing-only queued strip shows close `×` without phantom Interrupt/Clear buttons.
+        view.update_in(cx, |view, _, cx| {
+            view.session.queued.preparing = Some("Preparing follow-up…".into());
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("queued-strip").is_some());
+        // `queue-send-now-btn` has never been drawn while `total == 0`.
+        assert!(cx.debug_bounds("queue-send-now-btn").is_none());
+        let q_close = cx.debug_bounds("queue-close-btn").expect("queue close x");
+        cx.simulate_click(q_close.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, _| assert!(view.session.queued.is_empty()));
+
+        // Queued steering strip clears optimistically via Clear button.
+        view.update_in(cx, |view, _, cx| {
+            view.session.queued.steering = vec!["Steer now".into()];
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        assert!(cx.debug_bounds("queue-send-now-btn").is_some());
+        let q_clear = cx.debug_bounds("queue-clear-btn").expect("queue clear");
+        cx.simulate_click(q_clear.center(), gpui::Modifiers::none());
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.read_with(cx, |view, _| assert!(view.session.queued.is_empty()));
+
+        // Quick Switcher `×` button closes modal.
+        view.update_in(cx, |view, window, cx| {
+            view.open_modal(ActiveModal::QuickSwitcher, window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let close_sw = cx
+            .debug_bounds("close-switcher-modal")
+            .expect("switcher close x");
+        cx.simulate_click(close_sw.center(), gpui::Modifiers::none());
+        view.read_with(cx, |view, _| assert!(view.active_modal.is_none()));
+
+        // Harness editor `×` button closes inline editor card.
+        view.update_in(cx, |view, window, cx| {
+            view.open_harness_tab(window, cx);
+            view.open_new_harness_editor(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(220));
+        cx.update(|window, cx| window.draw(cx).clear());
+        let close_ed = cx
+            .debug_bounds("close-harness-editor-x")
+            .expect("harness editor close x");
+        cx.simulate_click(close_ed.center(), gpui::Modifiers::none());
+        view.read_with(cx, |view, _| assert!(!view.harness_editor_open));
+
+        // Submitting a new /btw side question clears stale error state.
+        view.update_in(cx, |view, window, cx| {
+            view.session.side_question.open = true;
+            view.session.side_question.error = Some("Previous /btw failed".into());
+            view.side_question_input
+                .update(cx, |input, cx| input.set_text("Fresh question?", cx));
+            view.submit_side_question(window, cx);
+            assert!(view.session.side_question.error.is_none());
         });
         app.quit();
     }

@@ -65,11 +65,11 @@ impl PrimeDesktopView {
             || !self.api_key_input.read(cx).text().is_empty()
             || self.harness_editor_open
         {
-            self.toast = Some((
-                "Finish editing drafts and credentials before changing the CLI data folder.".into(),
+            self.show_toast(
+                "Finish editing drafts and credentials before changing the CLI data folder.",
                 true,
-            ));
-            cx.notify();
+                cx,
+            );
             return;
         }
         // Advise on a wrong folder rather than silently creating a second, empty CLI store there.
@@ -87,16 +87,18 @@ impl PrimeDesktopView {
             let valid = valid.await;
             let _ = this.update_in(cx, |view, window, cx| {
                 if !valid {
-                    view.toast = Some(("Choose the CLI data folder that contains sessions, settings.json or auth.json.".into(), true));
-                    cx.notify();
+                    view.show_toast(
+                        "Choose the CLI data folder that contains sessions, settings.json or auth.json.",
+                        true,
+                        cx,
+                    );
                     return;
                 }
                 let mut prefs = view.prefs.clone();
                 prefs.cli_data_dir = selected.filter(|dir| dir != &view.preferences_dir);
                 prefs.daemon_target = DaemonTarget::DesktopHarness;
                 if let Err(err) = prefs.save(&view.preferences_dir) {
-                    view.toast = Some((format!("Could not save the CLI data folder: {err}"), true));
-                    cx.notify();
+                    view.show_toast(format!("Could not save the CLI data folder: {err}"), true, cx);
                     return;
                 }
                 let preferences_dir = view.preferences_dir.clone();

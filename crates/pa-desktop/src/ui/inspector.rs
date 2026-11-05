@@ -665,41 +665,61 @@ fn render_harness_tab(
                     .flex_col()
                     .gap(px(7.0))
                     .child(
-                        div().flex().items_center().gap(px(4.0)).children(
-                            [
-                                (RefinementKind::Memory, "memory"),
-                                (RefinementKind::Prompt, "prompt"),
-                                (RefinementKind::Skill, "skill"),
-                                (RefinementKind::Subagent, "subagent"),
-                            ]
-                            .into_iter()
-                            .map(|(k, name)| {
-                                let active = view.harness_editor_kind == k;
+                        div()
+                            .flex()
+                            .items_center()
+                            .justify_between()
+                            .gap(px(6.0))
+                            .child(
+                                div().flex().items_center().gap(px(4.0)).children(
+                                    [
+                                        (RefinementKind::Memory, "memory"),
+                                        (RefinementKind::Prompt, "prompt"),
+                                        (RefinementKind::Skill, "skill"),
+                                        (RefinementKind::Subagent, "subagent"),
+                                    ]
+                                    .into_iter()
+                                    .map(|(k, name)| {
+                                        let active = view.harness_editor_kind == k;
+                                        div()
+                                            .id(SharedString::from(format!("edit-kind-{name}")))
+                                            .px(px(7.0))
+                                            .py(px(2.5))
+                                            .rounded_md()
+                                            .cursor_pointer()
+                                            .bg(if active {
+                                                palette.accent_soft
+                                            } else {
+                                                palette.bg_code
+                                            })
+                                            .font_family(font_mono())
+                                            .text_size(px(11.0))
+                                            .text_color(if active {
+                                                palette.accent
+                                            } else {
+                                                palette.text_muted
+                                            })
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.harness_editor_kind = k;
+                                                cx.notify();
+                                            }))
+                                            .child(name)
+                                    }),
+                                ),
+                            )
+                            .child(
                                 div()
-                                    .id(SharedString::from(format!("edit-kind-{name}")))
-                                    .px(px(7.0))
-                                    .py(px(2.5))
+                                    .id("close-harness-editor-x")
+                                    .debug_selector(|| "close-harness-editor-x".to_owned())
+                                    .p(px(3.5))
                                     .rounded_md()
                                     .cursor_pointer()
-                                    .bg(if active {
-                                        palette.accent_soft
-                                    } else {
-                                        palette.bg_code
-                                    })
-                                    .font_family(font_mono())
-                                    .text_size(px(11.0))
-                                    .text_color(if active {
-                                        palette.accent
-                                    } else {
-                                        palette.text_muted
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.harness_editor_kind = k;
-                                        cx.notify();
+                                    .hover(|s| s.bg(palette.bg_hover))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.close_harness_editor(window, cx);
                                     }))
-                                    .child(name)
-                            }),
-                        ),
+                                    .child(Icon::Close.render(12.5, palette.text_muted)),
+                            ),
                     )
                     .child(
                         div()

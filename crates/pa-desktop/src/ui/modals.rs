@@ -180,8 +180,11 @@ fn render_model_picker_modal(
                                 .child(
                                     div()
                                         .id("close-model-modal")
+                                        .debug_selector(|| "close-model-modal".to_owned())
                                         .p(px(4.0))
+                                        .rounded_md()
                                         .cursor_pointer()
+                                        .hover(|s| s.bg(palette.bg_hover))
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.close_modal(window, cx);
                                         }))
@@ -535,6 +538,19 @@ fn render_quick_switcher_modal(
                         .flex_1()
                         .min_w_0()
                         .child(view.modal_search_input.clone()),
+                )
+                .child(
+                    div()
+                        .id("close-switcher-modal")
+                        .debug_selector(|| "close-switcher-modal".to_owned())
+                        .p(px(4.0))
+                        .rounded_md()
+                        .cursor_pointer()
+                        .hover(|s| s.bg(palette.bg_hover))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_modal(window, cx);
+                        }))
+                        .child(Icon::Close.render(14.0, palette.text_muted)),
                 ),
         )
         .child(
@@ -651,8 +667,11 @@ fn render_settings_auth_modal(
                 .child(
                     div()
                         .id("close-settings-modal")
+                        .debug_selector(|| "close-settings-modal".to_owned())
                         .p(px(4.0))
+                        .rounded_md()
                         .cursor_pointer()
+                        .hover(|s| s.bg(palette.bg_hover))
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.close_modal(window, cx);
                         }))
