@@ -31,7 +31,7 @@ On Windows, use `py -3 scripts/build_desktop.py` instead. For an existing checko
 - **macOS:** Install Xcode and the Metal toolchain. `make desktop-app` is still available if you want an unpacked `.app` in `dist/`.
 - **Linux:** On Ubuntu 24.04 install the [native build dependencies listed in CI](.github/workflows/desktop-build.yml). Other distributions may use different names for the same libraries.
 
-Maintainers can run the [Desktop build workflow](https://github.com/mweinbach/prime-agent-ui/actions/workflows/desktop-build.yml) to build all four archives without creating a release. A `desktop-v*` tag builds the same matrix and publishes the archives to GitHub Releases if every build passes.
+Maintainers can run the [Desktop build workflow](https://github.com/mweinbach/prime-agent-ui/actions/workflows/desktop-build.yml) to build all four archives without creating a release. Pushing a `release/desktop-v*` candidate branch also builds and verifies the four archives. A `desktop-v*` tag builds the same matrix and publishes the archives to GitHub Releases if every build passes.
 
 See the [desktop guide](crates/pa-desktop/README.md) for projects, subagents, CLI data, and headless tests.
 
