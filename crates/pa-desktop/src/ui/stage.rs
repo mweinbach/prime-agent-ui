@@ -25,15 +25,21 @@ pub fn render_stage(
     view: &PrimeDesktopView,
     palette: Palette,
     sidebar_docked: bool,
+    docked_sidebar_width: gpui::Pixels,
     cx: &mut Context<PrimeDesktopView>,
 ) -> AnyElement {
     let attached = !view.session.active_session_id.is_empty();
     let empty = view.session.entries.is_empty() && !view.session.is_streaming;
-    let clear_traffic_lights = cfg!(target_os = "macos") && !sidebar_docked;
+    let titlebar_padding = if cfg!(target_os = "macos") {
+        (px(82.0) - docked_sidebar_width).max(px(20.0))
+    } else {
+        px(20.0)
+    };
     let project_cwd = view.current_project();
     let subagent_count = view.rlm_children.rows.len();
 
     div()
+        .debug_selector(|| "workspace-stage".to_owned())
         .flex_1()
         .min_w_0()
         .h_full()
@@ -45,7 +51,7 @@ pub fn render_stage(
             div()
                 .h(px(52.0))
                 .flex_none()
-                .pl(px(if clear_traffic_lights { 82.0 } else { 20.0 }))
+                .pl(titlebar_padding)
                 .pr(px(16.0))
                 .flex()
                 .items_center()

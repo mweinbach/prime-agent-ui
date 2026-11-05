@@ -18,7 +18,7 @@ use crate::ui::text_input::TextInput;
 use crate::ui::workspace::PrimeDesktopView;
 
 const ROW_HEIGHT: f32 = 30.0;
-const SIDEBAR_WIDTH: f32 = 264.0;
+pub(super) const SIDEBAR_WIDTH: f32 = 264.0;
 pub(super) const GLOBAL_SEARCH: &str = "Search projects and chats";
 
 struct ProjectTooltip {
@@ -352,6 +352,7 @@ pub fn render_sidebar(
 ) -> AnyElement {
     div()
         .w(px(SIDEBAR_WIDTH))
+        .max_w_full()
         .h_full()
         .flex_none()
         .flex()

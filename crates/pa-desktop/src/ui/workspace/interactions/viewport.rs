@@ -3,6 +3,7 @@ use gpui::{Context, Focusable as _, ScrollWheelEvent, Window, px};
 
 use crate::theme::InspectorTab;
 use crate::ui::workspace::PrimeDesktopView;
+use crate::ui::workspace::panel_motion::SIDEBAR_BREAKPOINT;
 
 impl PrimeDesktopView {
     pub(in crate::ui::workspace) fn schedule_tail_scroll(
@@ -53,14 +54,14 @@ impl PrimeDesktopView {
     }
 
     pub(crate) fn close_sidebar_overlay(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if window.viewport_size().width < px(760.0) && self.prefs.sidebar_open {
+        if window.viewport_size().width < px(SIDEBAR_BREAKPOINT) && self.prefs.sidebar_open {
             self.toggle_sidebar(window, cx);
         }
     }
 
     pub fn toggle_sidebar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.prefs.sidebar_open = !self.prefs.sidebar_open;
-        if self.prefs.sidebar_open && window.viewport_size().width < px(760.0) {
+        if self.prefs.sidebar_open && window.viewport_size().width < px(SIDEBAR_BREAKPOINT) {
             self.prefs.inspector_open = false;
         }
         window.focus(&self.composer_input.focus_handle(cx));
@@ -70,7 +71,7 @@ impl PrimeDesktopView {
 
     pub fn toggle_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.prefs.inspector_open = !self.prefs.inspector_open;
-        if self.prefs.inspector_open && window.viewport_size().width < px(760.0) {
+        if self.prefs.inspector_open && window.viewport_size().width < px(SIDEBAR_BREAKPOINT) {
             self.prefs.sidebar_open = false;
         }
         window.focus(&self.composer_input.focus_handle(cx));
@@ -85,7 +86,7 @@ impl PrimeDesktopView {
         cx: &mut Context<Self>,
     ) {
         self.prefs.inspector_open = true;
-        if window.viewport_size().width < px(760.0) {
+        if window.viewport_size().width < px(SIDEBAR_BREAKPOINT) {
             self.prefs.sidebar_open = false;
         }
         self.prefs.inspector_tab = tab;

@@ -10,6 +10,7 @@ use crate::bridge::BridgeRequest;
 use crate::theme::{font_mono, font_sans};
 use crate::ui::composer::slash_matches;
 use crate::ui::text_input::{TextChanged, TextInput, TextSubmitted};
+use crate::ui::workspace::panel_motion::{INSPECTOR_BREAKPOINT, SIDEBAR_BREAKPOINT};
 
 impl PrimeDesktopView {
     pub(super) fn focus_active_surface(&self, window: &mut Window, cx: &Context<Self>) {
@@ -25,11 +26,38 @@ impl PrimeDesktopView {
             {
                 self.api_key_input.focus_handle(cx)
             }
-            // The credential field is conditional. Keep shortcuts on the root while providers load.
-            Some(ActiveModal::SettingsAuth) => self.focus_handle.clone(),
+            // The credential field is conditional. The motion control is always mounted.
+            Some(ActiveModal::SettingsAuth) => self.settings_motion_focus.clone(),
             None => self.composer_input.focus_handle(cx),
         };
         window.focus(&handle);
+    }
+
+    pub(in crate::ui) fn toggle_reduce_motion(&mut self, cx: &mut Context<Self>) {
+        self.prefs.reduce_motion = !self.prefs.reduce_motion;
+        self.save_preferences();
+        cx.notify();
+    }
+
+    pub(in crate::ui) fn tab_settings(
+        &mut self,
+        event: &gpui::KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let stroke = &event.keystroke;
+        if stroke.key != "tab"
+            || !(stroke.modifiers == gpui::Modifiers::none()
+                || stroke.modifiers == gpui::Modifiers::shift())
+        {
+            return;
+        }
+        if self.settings_motion_focus.is_focused(window) {
+            self.focus_active_surface(window, cx);
+        } else {
+            window.focus(&self.settings_motion_focus);
+        }
+        cx.stop_propagation();
     }
 
     pub(super) fn bind_input_interactions(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -251,9 +279,9 @@ impl PrimeDesktopView {
         let width = window.viewport_size().width;
         if self.active_modal.is_some() {
             self.close_modal(window, cx);
-        } else if self.prefs.inspector_open && width < px(1000.0) {
+        } else if self.prefs.inspector_open && width < px(INSPECTOR_BREAKPOINT) {
             self.toggle_inspector(window, cx);
-        } else if self.prefs.sidebar_open && width < px(760.0) {
+        } else if self.prefs.sidebar_open && width < px(SIDEBAR_BREAKPOINT) {
             self.toggle_sidebar(window, cx);
         } else if self.renaming_session {
             self.renaming_session = false;
@@ -337,6 +365,49 @@ mod tests {
         cx.executor()
             .block_test(cx.condition(&view, |view, _| view.toast.is_some()));
         (view, cx)
+    }
+
+    #[test]
+    fn reduce_motion_toggles_from_settings_and_survives_relaunch() {
+        let profile = TempDir::new().unwrap();
+        // A preference file from before Reduce motion retains its other values.
+        std::fs::write(
+            profile.path().join("desktop-ui.json"),
+            r#"{"sidebarOpen":false}"#,
+        )
+        .unwrap();
+        let mut app = TestAppContext::single();
+        let (view, cx) = workspace(&mut app, &profile);
+        view.update_in(cx, |view, _, cx| view.reload_local_stores(cx));
+        cx.executor()
+            .block_test(cx.condition(&view, |view, _| !view.provider_auth.is_empty()));
+        view.update_in(cx, |view, window, cx| {
+            assert!(!view.prefs.reduce_motion && !view.prefs.sidebar_open);
+            view.open_settings_modal(window, cx);
+            assert!(view.api_key_input.focus_handle(cx).is_focused(window));
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        cx.simulate_keystrokes("tab");
+        cx.update(|window, cx| window.draw(cx).clear());
+        view.update_in(cx, |view, window, _| {
+            assert!(view.settings_motion_focus.is_focused(window));
+        });
+        cx.simulate_event(gpui::KeyUpEvent {
+            keystroke: gpui::Keystroke::parse("space").unwrap(),
+        });
+        let saved = crate::theme::DesktopPreferences::load(profile.path());
+        assert!(saved.reduce_motion && !saved.sidebar_open);
+        cx.simulate_keystrokes("shift-tab");
+        view.update_in(cx, |view, window, cx| {
+            assert!(view.api_key_input.focus_handle(cx).is_focused(window));
+        });
+        cx.update(|window, cx| window.draw(cx).clear());
+        let bounds = cx
+            .debug_bounds("reduce-motion")
+            .expect("motion control is visible");
+        cx.simulate_click(bounds.center(), gpui::Modifiers::none());
+        assert!(!crate::theme::DesktopPreferences::load(profile.path()).reduce_motion);
+        app.quit();
     }
 
     #[test]

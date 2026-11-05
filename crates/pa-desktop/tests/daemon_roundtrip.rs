@@ -704,6 +704,11 @@ fn a_spawned_subagent_updates_its_card_and_opens_its_own_transcript() {
             .any(|c| c.name == "reviewer" && c.status == "running")
     });
     click(cx, "session-subagents");
+    // Socket traffic advances wall time, while GPUI's test animation clock stays still.
+    // Draw the opening inspector, then advance past its slide before clicking a child.
+    cx.update(|window, cx| window.draw(cx).clear());
+    cx.background_executor
+        .advance_clock(Duration::from_millis(250));
     std::fs::write(release, b"observed").unwrap();
     wait_for_workspace(cx, &view, &rt, |w| {
         w.rlm_children.rows.iter().any(|c| {

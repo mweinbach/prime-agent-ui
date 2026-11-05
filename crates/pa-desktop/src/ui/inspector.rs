@@ -15,6 +15,8 @@ use crate::ui::modals::confirm_action;
 use crate::ui::tool_cards::pill;
 use crate::ui::workspace::PrimeDesktopView;
 
+pub(super) const INSPECTOR_WIDTH: f32 = 328.0;
+
 #[must_use]
 pub fn render_inspector(
     view: &PrimeDesktopView,
@@ -26,7 +28,7 @@ pub fn render_inspector(
     let sid = view.session.active_session_id.clone();
 
     div()
-        .w(px(328.0))
+        .w(px(INSPECTOR_WIDTH))
         .max_w_full()
         .min_w_0()
         .h_full()

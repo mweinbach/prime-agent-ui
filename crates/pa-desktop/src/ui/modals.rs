@@ -1,6 +1,8 @@
 //! Overlay modals: Searchable Model Picker (`⌘M`), Quick Switcher / Command Palette (`⌘K`),
 //! and Provider Credentials & Desktop Settings (`⌘,`).
 
+mod motion;
+
 use gpui::{
     AnyElement, App, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px,
 };
@@ -46,19 +48,26 @@ pub fn render_active_modal(
     palette: Palette,
     cx: &mut Context<PrimeDesktopView>,
 ) -> AnyElement {
-    let card = match modal {
-        ActiveModal::ModelPicker => render_model_picker_modal(view, palette, cx),
-        ActiveModal::QuickSwitcher => render_quick_switcher_modal(view, palette, cx),
-        ActiveModal::SettingsAuth => render_settings_auth_modal(view, palette, cx),
+    let (entrance_id, contents) = match modal {
+        ActiveModal::ModelPicker => (
+            "model-picker-entrance",
+            render_model_picker_modal(view, palette, cx),
+        ),
+        ActiveModal::QuickSwitcher => (
+            "quick-switcher-entrance",
+            render_quick_switcher_modal(view, palette, cx),
+        ),
+        ActiveModal::SettingsAuth => (
+            "settings-entrance",
+            render_settings_auth_modal(view, palette, cx),
+        ),
     };
-
-    div()
+    let backdrop = div()
         .id("modal-backdrop-scrim")
         .absolute()
         .top_0()
         .left_0()
         .size_full()
-        .bg(palette.bg_scrim)
         .flex()
         .items_center()
         .justify_center()
@@ -66,22 +75,27 @@ pub fn render_active_modal(
         .p(px(24.0))
         .on_click(cx.listener(|this, _, window, cx| {
             this.close_modal(window, cx);
-        }))
-        .child(
-            div()
-                .id("modal-card-surface")
-                .min_w_0()
-                .w_full()
-                .max_w(px(610.0))
-                .max_h_full()
-                .flex()
-                .flex_col()
-                .on_click(|_, _, cx| {
-                    cx.stop_propagation();
-                })
-                .child(card),
-        )
-        .into_any_element()
+        }));
+    let sheet = div()
+        .id("modal-card-surface")
+        .min_w_0()
+        .w_full()
+        .max_w(px(610.0))
+        .max_h_full()
+        .flex()
+        .flex_col()
+        .on_click(|_, _, cx| {
+            cx.stop_propagation();
+        })
+        .child(contents);
+    motion::ModalEntrance {
+        entrance_id,
+        backdrop,
+        sheet,
+        scrim: palette.bg_scrim,
+        reduce_motion: view.prefs.reduce_motion,
+    }
+    .into_any_element()
 }
 
 #[allow(clippy::too_many_lines)]
@@ -599,6 +613,7 @@ fn render_settings_auth_modal(
     cx: &mut Context<PrimeDesktopView>,
 ) -> AnyElement {
     div()
+        .capture_key_down(cx.listener(PrimeDesktopView::tab_settings))
         .w_full()
         .max_h(px(520.0))
         .rounded_2xl()
@@ -652,6 +667,50 @@ fn render_settings_auth_modal(
                 .flex()
                 .flex_col()
                 .gap(px(12.0))
+                .child(
+                    div()
+                        .id("reduce-motion")
+                        .debug_selector(|| "reduce-motion".into())
+                        .track_focus(&view.settings_motion_focus)
+                        .cursor_pointer()
+                        .flex_none()
+                        .min_w_0()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.0))
+                        .p(px(12.0))
+                        .rounded_xl()
+                        .border_1()
+                        .border_color(palette.border_subtle)
+                        .bg(palette.bg_canvas)
+                        .hover(|s| s.bg(palette.bg_hover))
+                        .focus(|s| s.border_color(palette.accent))
+                        .on_click(cx.listener(|view, _, _, cx| view.toggle_reduce_motion(cx)))
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .font_weight(FontWeight::MEDIUM)
+                                .child("Reduce motion"),
+                        )
+                        .child(pill(
+                            if view.prefs.reduce_motion {
+                                "On"
+                            } else {
+                                "Off"
+                            },
+                            if view.prefs.reduce_motion {
+                                palette.accent_soft
+                            } else {
+                                palette.bg_hover
+                            },
+                            if view.prefs.reduce_motion {
+                                palette.accent
+                            } else {
+                                palette.text_secondary
+                            },
+                        )),
+                )
                 .child(view.cli_data_card(palette, cx))
                 // Daemon Socket Info Card
                 .child(

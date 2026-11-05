@@ -145,6 +145,8 @@ impl InspectorTab {
 #[serde(default, rename_all = "camelCase")]
 pub struct DesktopPreferences {
     pub theme: ThemeMode,
+    #[serde(default)]
+    pub reduce_motion: bool,
     pub sidebar_open: bool,
     pub inspector_open: bool,
     pub inspector_tab: InspectorTab,
@@ -161,6 +163,7 @@ impl Default for DesktopPreferences {
     fn default() -> Self {
         Self {
             theme: ThemeMode::default(),
+            reduce_motion: false,
             sidebar_open: true,
             inspector_open: false,
             inspector_tab: InspectorTab::Agents,

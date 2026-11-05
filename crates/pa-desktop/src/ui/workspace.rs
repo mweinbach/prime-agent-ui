@@ -3,8 +3,10 @@
 
 mod cli_data;
 mod interactions;
+mod panel_motion;
 mod projects;
 use crate::state::{DraftKey, subagents::Subagents};
+use panel_motion::SIDEBAR_BREAKPOINT;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read as _;
@@ -31,11 +33,8 @@ use crate::state::{
     ShellProcessRow, StagedImage,
 };
 use crate::theme::{DaemonTarget, DesktopPreferences, InspectorTab, Palette, ThemeMode, font_sans};
-use crate::ui::inspector::render_inspector;
 use crate::ui::modals::render_active_modal;
 use crate::ui::selectable_text::{ActiveSelection, CopySelection};
-use crate::ui::sidebar::render_sidebar;
-use crate::ui::stage::render_stage;
 use crate::ui::text_input::{InputKind, TextInput};
 
 actions!(
@@ -217,11 +216,13 @@ pub struct PrimeDesktopView {
     pub(super) modal_selected_idx: usize,
     pub(super) slash_selected_idx: usize,
     pub(super) modal_scroll: ScrollHandle,
+    pub(super) settings_motion_focus: FocusHandle,
     pub renaming_session: bool,
     pub agent_mail_target: Option<String>,
     pub staged_images: Vec<StagedImage>,
 
     pub(super) active_selection: ActiveSelection,
+    panel_motion: panel_motion::PanelMotion,
     pub(super) follow_tail: bool,
     pub transcript_scroll: ScrollHandle,
     pub composer_input: Entity<TextInput>,
@@ -407,10 +408,12 @@ impl PrimeDesktopView {
             modal_selected_idx: 0,
             slash_selected_idx: 0,
             modal_scroll: ScrollHandle::new(),
+            settings_motion_focus: cx.focus_handle(),
             renaming_session: false,
             agent_mail_target: None,
             staged_images: Vec::new(),
             active_selection: ActiveSelection::default(),
+            panel_motion: panel_motion::PanelMotion::default(),
             follow_tail: true,
             transcript_scroll: ScrollHandle::new(),
             composer_input,
@@ -1589,7 +1592,7 @@ impl Render for PrimeDesktopView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::for_mode(self.prefs.theme);
         let width = window.viewport_size().width;
-        if width < px(760.0) && self.prefs.inspector_open && self.prefs.sidebar_open {
+        if width < px(SIDEBAR_BREAKPOINT) && self.prefs.inspector_open && self.prefs.sidebar_open {
             self.prefs.sidebar_open = false;
             if self
                 .sidebar_search_input
@@ -1600,10 +1603,6 @@ impl Render for PrimeDesktopView {
             }
         }
         self.schedule_tail_scroll(window, cx);
-        let sidebar_docked = self.prefs.sidebar_open && width >= px(760.0);
-        let inspector_docked = self.prefs.inspector_open && width >= px(1000.0);
-        let sidebar_overlay = self.prefs.sidebar_open && !sidebar_docked;
-        let inspector_overlay = self.prefs.inspector_open && !inspector_docked;
 
         div()
             .id("pa-desktop-root")
@@ -1660,54 +1659,7 @@ impl Render for PrimeDesktopView {
                 this.open_settings_modal(window, cx);
             }))
             .on_action(cx.listener(Self::dismiss_overlay))
-            // Three-Zone Spatial Layout
-            .child(
-                div()
-                    .size_full()
-                    .flex()
-                    .flex_row()
-                    .overflow_hidden()
-                    .when(sidebar_docked, |d| {
-                        d.child(render_sidebar(self, window, palette, cx))
-                    })
-                    .child(render_stage(self, palette, sidebar_docked, cx))
-                    .when(inspector_docked, |d| {
-                        d.child(render_inspector(self, palette, cx))
-                    }),
-            )
-            .when(sidebar_overlay || inspector_overlay, |d| {
-                let panel = if inspector_overlay {
-                    render_inspector(self, palette, cx)
-                } else {
-                    render_sidebar(self, window, palette, cx)
-                };
-                d.child(
-                    div()
-                        .id("drawer-scrim")
-                        .absolute()
-                        .inset_0()
-                        .occlude()
-                        .bg(palette.bg_scrim)
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            if inspector_overlay {
-                                view.toggle_inspector(window, cx);
-                            } else {
-                                view.toggle_sidebar(window, cx);
-                            }
-                        })),
-                )
-                .child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .when(inspector_overlay, gpui::Styled::right_0)
-                        .when(!inspector_overlay, gpui::Styled::left_0)
-                        .occlude()
-                        .shadow_lg()
-                        .child(panel),
-                )
-            })
+            .child(self.render_panes(window, palette, cx))
             // Active Modal Overlay
             .when_some(self.active_modal, |d, modal| {
                 d.child(render_active_modal(modal, self, palette, cx))
