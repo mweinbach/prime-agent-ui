@@ -118,6 +118,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_NOTES: |
+            [Desktop changes](${{ github.server_url }}/${{ github.repository }}/blob/${{ github.ref_name }}/CHANGELOG.md)
+
             Choose the archive for your operating system and CPU.
             The macOS app is ad-hoc signed and is not notarized. The Windows binaries are unsigned.
             The Linux build targets Ubuntu 24.04 x86_64 and needs a Vulkan-capable desktop.

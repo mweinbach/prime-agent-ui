@@ -29,6 +29,11 @@ time = { version = "0.3", features = ["formatting", "parsing", "local-offset"] }
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 gpui = { version = "0.2.2", default-features = false, features = ["font-kit", "wayland", "x11"] }
 
+# GPUI imports TaskDialogIndirect, which requires the Common Controls v6 manifest
+# even for a headless --version probe. Default features are disabled above.
+[target.'cfg(windows)'.dependencies]
+gpui = { version = "0.2.2", default-features = false, features = ["windows-manifest"] }
+
 [dev-dependencies]
 gpui = { version = "0.2.2", default-features = false, features = ["test-support"] }
 tempfile = "3"
