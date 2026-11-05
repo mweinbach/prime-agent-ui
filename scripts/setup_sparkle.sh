@@ -17,18 +17,20 @@ if [[ ${1:-} == --publish ]]; then
   [[ $commit == "$remote" ]] || { echo "Update this checkout to the current GitHub main first." >&2; exit 1; }
   version=$(python3 -B -c 'import sys; from pathlib import Path; sys.path.insert(0,"scripts"); from package_desktop_app import parse_workspace_version; print(parse_workspace_version(Path(".")))')
 fi
-existing=$(gh variable list --limit 1000 --repo "$repo" --json name,value --jq '.[] | select(.name == "SPARKLE_PUBLIC_ED_KEY") | .value')
-secrets=$(gh secret list --limit 1000 --repo "$repo" --json name --jq '.[].name')
+existing=$(gh api --paginate "repos/$repo/actions/variables?per_page=100" \
+  --jq '.variables[] | select(.name == "SPARKLE_PUBLIC_ED_KEY") | .value')
+existing_secret=$(gh api --paginate "repos/$repo/actions/secrets?per_page=100" \
+  --jq '.secrets[] | select(.name == "SPARKLE_PRIVATE_ED_KEY") | .name')
+if [[ -z $existing && -n $existing_secret ]]; then
+  echo "A signing secret already exists. Restore its matching public variable before enrolling." >&2
+  exit 1
+fi
 scripts/fetch_sparkle.sh "$scratch/sdk"
 keytool="$scratch/sdk/bin/generate_keys"
 "$keytool" --account "$account"
 public=$("$keytool" --account "$account" -p)
 if [[ -n $existing && $public != "$existing" ]]; then
   echo "The repository trusts a different key. Use its Keychain account via SPARKLE_KEY_ACCOUNT." >&2
-  exit 1
-fi
-if [[ -z $existing ]] && grep -Fxq SPARKLE_PRIVATE_ED_KEY <<< "$secrets"; then
-  echo "A signing secret already exists. Restore its matching public variable before enrolling." >&2
   exit 1
 fi
 "$keytool" --account "$account" -x "$scratch/key"
