@@ -84,7 +84,7 @@ fn picker_tracks_the_current_model_across_providers_and_filters_the_full_catalog
     let chosen = app.state.catalog_models[index].clone();
     app.update(|view, _| {
         view.catalog_models
-            .retain(|model| model.provider != "other")
+            .retain(|model| model.provider != "other");
     });
     app.frame(0.0);
     key(&mut app, Key::Enter);

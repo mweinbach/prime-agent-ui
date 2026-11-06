@@ -65,9 +65,9 @@ impl PrimeDesktopView {
     pub(super) fn validate_reasoning_picker(&mut self) {
         if self.reasoning_picker_open
             && self.model_catalog_loaded()
-            && !self
+            && self
                 .current_catalog_model()
-                .is_some_and(|model| model.supported_levels.len() > 1)
+                .is_none_or(|model| model.supported_levels.len() <= 1)
         {
             self.close_reasoning_picker();
             let message = if self.current_catalog_model().is_some() {
