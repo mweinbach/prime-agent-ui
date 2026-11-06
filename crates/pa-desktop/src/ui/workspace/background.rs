@@ -90,3 +90,46 @@ impl PrimeDesktopView {
         changed
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ui::workspace::LaunchOptions;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn sleeping_window_wakes_for_completed_io_without_polling_a_timer() {
+        let profile = tempfile::tempdir().unwrap();
+        let mut view = PrimeDesktopView::new(
+            LaunchOptions {
+                daemon_socket: Some(profile.path().join("offline.sock")),
+                initial_cwd: Some(profile.path().into()),
+                ..Default::default()
+            },
+            profile.path().into(),
+        );
+        let (wake, wakes) = mpsc::channel();
+        view.set_waker(Arc::new(move || {
+            let _ = wake.send(());
+        }));
+        let (release, start) = mpsc::channel();
+        view.background.run(&view.bridge, move || {
+            start
+                .recv_timeout(Duration::from_secs(5))
+                .expect("release I/O");
+            |s: &mut PrimeDesktopView| s.model_picker_configured_only = true
+        });
+        // Register the shell waker on both event streams before the worker completes.
+        view.drain_events();
+        while wakes.try_recv().is_ok() {}
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !view.model_picker_configured_only {
+            wakes
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("shell wake");
+            view.drain_events();
+        }
+    }
+}

@@ -35,7 +35,12 @@ pub(super) fn project_pin(cwd: &str, pinned: bool, p: Palette) -> El {
 
 pub(super) fn project(group: &ProjectGroup, current: bool, searching: bool, p: Palette) -> El {
     let key = group.key().to_owned();
-    let mut heading = row().h(ROW_HEIGHT).center_y().gap(2.0).px(2.0);
+    let mut heading = row()
+        .hover_group()
+        .h(ROW_HEIGHT)
+        .center_y()
+        .gap(2.0)
+        .px(2.0);
     if !searching {
         let icon = if group.collapsed {
             Icon::ChevronRight
@@ -97,16 +102,19 @@ pub(super) fn project(group: &ProjectGroup, current: bool, searching: bool, p: P
     heading = heading.child(title);
     if let Some(path) = group.folder() {
         let path = path.to_owned();
-        heading = heading.child(project_pin(&path, group.added, p)).child(
-            icon_button(
-                format!("project-new-chat-{path}"),
-                format!("New chat in {}", group.label),
-                Icon::Compose,
-                p,
-            )
-            .size(22.0, 24.0)
-            .on_press(move |s: &mut PrimeDesktopView| s.new_project_chat(&path)),
-        );
+        heading = heading
+            .child(project_pin(&path, group.added, p).group_opacity(0.38, 1.0))
+            .child(
+                icon_button(
+                    format!("project-new-chat-{path}"),
+                    format!("New chat in {}", group.label),
+                    Icon::Compose,
+                    p,
+                )
+                .group_opacity(0.38, 1.0)
+                .size(22.0, 24.0)
+                .on_press(move |s: &mut PrimeDesktopView| s.new_project_chat(&path)),
+            );
     } else if group.collapsed {
         heading = heading.child(label(
             group.chats.len().to_string(),
@@ -149,7 +157,12 @@ pub(super) fn chat(key: String, title: &str, icon: El, selected: bool, p: Palett
                 ),
         );
     if selected {
-        item = item.fill(p.bg_selected);
+        item = item.fill(p.bg_selected).child(
+            el().size(2.5, 14.0)
+                .absolute(3.0, 8.0)
+                .radius(1.25)
+                .fill(p.accent),
+        );
     }
     item
 }
@@ -169,6 +182,7 @@ pub(super) fn live_chat(agent: &ActiveSessionRow, selected: bool, p: Palette) ->
         "Live · Idle"
     };
     row()
+        .hover_group()
         .h(ROW_HEIGHT)
         .center_y()
         .child(
@@ -183,6 +197,7 @@ pub(super) fn live_chat(agent: &ActiveSessionRow, selected: bool, p: Palette) ->
         )
         .child(
             icon_button(format!("kill-active-{id}"), "Stop session", Icon::Stop, p)
+                .group_opacity(0.38, 1.0)
                 .size(22.0, 24.0)
                 .on_press(move |s: &mut PrimeDesktopView| {
                     let sid = id.clone();
@@ -191,7 +206,7 @@ pub(super) fn live_chat(agent: &ActiveSessionRow, selected: bool, p: Palette) ->
                         "Stop session",
                         move |s| {
                             s.bridge.send(BridgeRequest::KillSession {
-                                active_session_id: sid.clone(),
+                                active_session_id: sid,
                             });
                         },
                     );
@@ -204,7 +219,7 @@ pub(super) fn saved_chat(agent: &SavedSessionRow, selected: bool, p: Palette) ->
     let cwd = (!agent.cwd.is_empty()).then(|| agent.cwd.clone());
     let del = path.clone();
     let title = agent.name.clone();
-    let mut item = row().h(ROW_HEIGHT).center_y().child(
+    let mut item = row().hover_group().h(ROW_HEIGHT).center_y().child(
         chat(
             format!("saved-chat-{path}"),
             &title,
@@ -226,6 +241,7 @@ pub(super) fn saved_chat(agent: &SavedSessionRow, selected: bool, p: Palette) ->
     }
     item.child(
         icon_button(format!("del-saved-{del}"), "Delete chat", Icon::Trash, p)
+            .group_opacity(0.38, 1.0)
             .size(22.0, 24.0)
             .on_press(move |s: &mut PrimeDesktopView| {
                 let del = del.clone();
@@ -233,9 +249,8 @@ pub(super) fn saved_chat(agent: &SavedSessionRow, selected: bool, p: Palette) ->
                     format!("Permanently delete “{title}” from saved chats?"),
                     "Delete chat",
                     move |s| {
-                        s.bridge.send(BridgeRequest::DeleteSavedSession {
-                            session_path: del.clone(),
-                        });
+                        s.bridge
+                            .send(BridgeRequest::DeleteSavedSession { session_path: del });
                     },
                 );
             }),

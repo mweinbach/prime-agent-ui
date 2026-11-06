@@ -303,7 +303,7 @@ impl Palette {
                 success_soft: rgba(0x6BA8_7C24),
                 warning: rgb(0x00D9_A45B),
                 warning_soft: rgba(0xD9A4_5B24),
-                danger: rgb(0x00DC_6B6B),
+                danger: rgb(0x00E1_7575),
                 danger_soft: rgba(0xDC6B_6B24),
                 info: rgb(0x0073_9EC2),
                 info_soft: rgba(0x739E_C224),
@@ -334,11 +334,11 @@ impl Palette {
                 selection_bg: rgba(0xC964_4236),
                 selection_bg_inactive: rgba(0xC964_421C),
 
-                success: rgb(0x002F_7D47),
+                success: rgb(0x002D_7341),
                 success_soft: rgba(0x2F7D_471C),
-                warning: rgb(0x00AD_721E),
+                warning: rgb(0x008C_5B18),
                 warning_soft: rgba(0xAD72_1E1C),
-                danger: rgb(0x00BF_3F3F),
+                danger: rgb(0x00B6_3838),
                 danger_soft: rgba(0xBF3F_3F1C),
                 info: rgb(0x0036_6994),
                 info_soft: rgba(0x3669_941C),
@@ -384,4 +384,49 @@ pub const fn font_sans() -> &'static str {
 #[must_use]
 pub const fn font_mono() -> &'static str {
     "Google Sans Code"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Rune already stores linear RGB, so WCAG's luminance weights apply directly.
+    fn contrast(fg: Color, bg: Color) -> f32 {
+        let luminance = |c: Color| 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+        let (a, b) = (luminance(fg), luminance(bg));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn labels_and_status_text_are_legible_on_each_workspace_surface() {
+        for mode in [ThemeMode::Light, ThemeMode::Dark] {
+            let p = Palette::for_mode(mode);
+            let surfaces = [
+                p.bg_canvas,
+                p.bg_sidebar,
+                p.bg_inspector,
+                p.bg_elevated,
+                p.bg_code,
+                p.bg_user_bubble,
+            ];
+            for ink in [
+                p.text_primary,
+                p.text_secondary,
+                p.text_muted,
+                p.accent,
+                p.success,
+                p.warning,
+                p.danger,
+                p.info,
+            ] {
+                for surface in surfaces {
+                    assert!(
+                        contrast(ink, surface) >= 4.5,
+                        "{mode:?} ink {ink:?} on {surface:?}"
+                    );
+                }
+            }
+            assert!(contrast(p.text_on_accent, p.accent) >= 4.5);
+        }
+    }
 }

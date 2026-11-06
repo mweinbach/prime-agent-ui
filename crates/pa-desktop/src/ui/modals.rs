@@ -83,8 +83,14 @@ impl PrimeDesktopView {
             .border(1.0, p.border_strong)
             .fill(p.bg_elevated)
             .shadow(8.0, 30.0, p.bg_scrim);
+        // Fade only the scrim. A sheet with a Rune presence transition ignores
+        // pointer presses until its entrance is under way.
+        let mut scrim = el().absolute(0.0, 0.0).w_full().h_full().fill(p.bg_scrim);
         if !self.prefs.reduce_motion && !cx.is_reduced_motion() {
-            card = card.transition(Transition::scale(0.985));
+            scrim = scrim.transition(Transition::opacity());
+        }
+        if let Some(toast) = self.notification(p) {
+            card = card.child(toast.pin(None, None, Some(12.0), Some(12.0)));
         }
         Some(
             col()
@@ -94,7 +100,7 @@ impl PrimeDesktopView {
                 .h_full()
                 .padding(22.0)
                 .center()
-                .fill(p.bg_scrim)
+                .child(scrim)
                 .child(card),
         )
     }
@@ -111,43 +117,6 @@ impl PrimeDesktopView {
     }
 
     fn picker(&self, models: bool, p: Palette) -> El {
-        let mut header = row().h(32.0).gap(6.0).center_y().child(
-            label(
-                if models {
-                    "Choose a model"
-                } else {
-                    "Quick switcher"
-                },
-                17.0,
-                600.0,
-                p.text_primary,
-            )
-            .grow(1.0)
-            .min_w(0.0),
-        );
-        if models {
-            let title = if self.model_picker_configured_only {
-                "Configured providers"
-            } else {
-                "All catalog models"
-            };
-            header = header.child(
-                button("toggle-configured-models", title, p)
-                    .fill(if self.model_picker_configured_only {
-                        p.accent_soft
-                    } else {
-                        p.bg_code
-                    })
-                    .on_press_tx(|s: &mut Self, tx| {
-                        s.model_picker_configured_only = !s.model_picker_configured_only;
-                        s.modal_selected_idx = 0;
-                        tx.scroll_to_y("picker-results", 0.0);
-                    }),
-            );
-        }
-        header = header.child(
-            icon_button("close-picker", "Close", Icon::Close, p).on_press(Self::close_modal),
-        );
         let mut rows = Vec::new();
         if models {
             let matching = self.matching_models();
@@ -230,6 +199,7 @@ impl PrimeDesktopView {
                     );
                 rows.push(
                     result_row(index, &command.title, selected, p)
+                        .h(36.0)
                         .child(content.key(command.id))
                         .on_press(move |s: &mut Self| command.target.activate(s)),
                 );
@@ -252,22 +222,22 @@ impl PrimeDesktopView {
         .min_w(0.0)
         .grow(1.0)
         .on_submit(|s: &mut Self, _| s.submit_modal_selection())
+        .on_input_change(|s: &mut Self, tx| {
+            s.modal_selected_idx = 0;
+            tx.scroll_to_y("picker-results", 0.0);
+        })
         .on_input_key(move |s: &mut Self, event, tx| {
             match event.key {
                 Key::Up => {
                     s.modal_selected_idx = s
                         .modal_selected_idx
                         .saturating_sub(1)
-                        .min(count.saturating_sub(1))
+                        .min(count.saturating_sub(1));
                 }
                 Key::Down => {
-                    s.modal_selected_idx = (s.modal_selected_idx + 1).min(count.saturating_sub(1))
+                    s.modal_selected_idx = (s.modal_selected_idx + 1).min(count.saturating_sub(1));
                 }
-                Key::Text(_) | Key::Backspace | Key::Delete => {
-                    s.modal_selected_idx = 0;
-                    tx.scroll_to_y("picker-results", 0.0);
-                    return false;
-                }
+                Key::Escape if event.mods == rune::Mods::default() => return s.dismiss_overlay(),
                 _ => return false,
             }
             if count > 0 {
@@ -291,24 +261,61 @@ impl PrimeDesktopView {
                 .wrap(),
             );
         }
+        let mut search_bar = row()
+            .h(34.0)
+            .center_y()
+            .gap(7.0)
+            .child(Icon::Search.render(14.0, p.text_muted))
+            .child(search);
+        let close =
+            icon_button("close-picker", "Close", Icon::Close, p).on_press(Self::close_modal);
+        let top = if models {
+            let filter = if self.model_picker_configured_only {
+                "Configured providers"
+            } else {
+                "All catalog models"
+            };
+            let filter = button("toggle-configured-models", filter, p)
+                .fill(if self.model_picker_configured_only {
+                    p.accent_soft
+                } else {
+                    p.bg_code
+                })
+                .on_press_tx(|s: &mut Self, tx| {
+                    s.model_picker_configured_only = !s.model_picker_configured_only;
+                    s.modal_selected_idx = 0;
+                    tx.scroll_to_y("picker-results", 0.0);
+                });
+            let header = row()
+                .h(32.0)
+                .gap(6.0)
+                .center_y()
+                .child(
+                    label("Choose a model", 17.0, 600.0, p.text_primary)
+                        .grow(1.0)
+                        .min_w(0.0),
+                )
+                .child(filter)
+                .child(close);
+            search_bar = search_bar
+                .px(8.0)
+                .radius(8.0)
+                .border(1.0, p.accent)
+                .fill(p.bg_code);
+            col().padding(14.0).gap(8.0).child(header).child(search_bar)
+        } else {
+            col().px(14.0).py(6.0).child(search_bar.child(close))
+        };
+        let height = if models {
+            480.0
+        } else {
+            (64.0 + 38.0 * rows.len() as f32).min(480.0)
+        };
         col()
-            .h(if models { 480.0 } else { 410.0 })
+            .h(height)
             .min_h(0.0)
             .shrink()
-            .child(
-                col().padding(14.0).gap(8.0).child(header).child(
-                    row()
-                        .h(34.0)
-                        .px(8.0)
-                        .gap(7.0)
-                        .center_y()
-                        .radius(8.0)
-                        .border(1.0, p.accent)
-                        .fill(p.bg_code)
-                        .child(Icon::Search.render(14.0, p.text_muted))
-                        .child(search),
-                ),
-            )
+            .child(top)
             .child(el().h(1.0).fill(p.border_subtle))
             .child(
                 col()
@@ -324,33 +331,41 @@ impl PrimeDesktopView {
 
     fn settings(&self, p: Palette) -> El {
         let header = row()
-            .h(50.0)
-            .px(15.0)
+            .h(54.0)
+            .px(18.0)
             .center_y()
             .gap(8.0)
             .child(Icon::Shield.render(16.0, p.accent))
-            .child(label("Settings", 17.0, 600.0, p.text_primary).grow(1.0))
+            .child(label("Settings", 19.0, 600.0, p.text_primary).grow(1.0))
             .child(
                 icon_button("close-settings", "Close settings", Icon::Close, p)
                     .on_press(Self::close_modal),
             );
+        let reduced = self.prefs.reduce_motion;
+        let track = el()
+            .key("motion-switch-track")
+            .size(32.0, 19.0)
+            .radius(10.0)
+            .fill(if reduced { p.accent } else { p.border_strong })
+            .child(
+                el().key("motion-switch-thumb")
+                    .size(13.0, 13.0)
+                    .radius(7.0)
+                    .fill(if reduced {
+                        p.text_on_accent
+                    } else {
+                        p.text_secondary
+                    })
+                    .absolute(if reduced { 16.0 } else { 3.0 }, 3.0),
+            );
         let motion = control("reduce-motion", "Reduce motion", p)
             .role("switch")
-            .checked(self.prefs.reduce_motion)
-            .h(32.0)
-            .px(8.0)
+            .checked(reduced)
+            .h(37.0)
+            .px(10.0)
             .center_y()
             .child(label("Reduce motion", 13.0, 500.0, p.text_primary).grow(1.0))
-            .child(label(
-                if self.prefs.reduce_motion {
-                    "On"
-                } else {
-                    "Off"
-                },
-                12.0,
-                500.0,
-                p.accent,
-            ))
+            .child(track)
             .on_press(Self::toggle_reduce_motion);
         let mut locations = row().gap(8.0).child(
             button("choose-cli-folder", "Choose folder…", p).on_press(Self::prompt_choose_cli_dir),
@@ -400,8 +415,8 @@ impl PrimeDesktopView {
             );
         }
         let content = col()
-            .padding(14.0)
-            .gap(10.0)
+            .padding(16.0)
+            .gap(12.0)
             .child(motion)
             .child(data)
             .child(connection)
@@ -527,8 +542,8 @@ impl PrimeDesktopView {
 
 fn settings_group(p: Palette) -> El {
     col()
-        .padding(10.0)
-        .gap(5.0)
+        .padding(12.0)
+        .gap(7.0)
         .radius(10.0)
         .border(1.0, p.border_subtle)
         .fill(p.bg_canvas)

@@ -299,6 +299,9 @@ impl PrimeDesktopView {
                     self.restore_draft();
                     self.selection = SessionSelection::Idle;
                     self.active_sessions.clear();
+                    // Reset invalidates the pending store request, including the
+                    // initial load if the offline socket answered first.
+                    self.reload_local_stores();
                 }
                 self.daemon_socket_display = socket_path.to_string_lossy().to_string();
                 self.daemon_version = daemon_version;
@@ -879,7 +882,7 @@ impl PrimeDesktopView {
     }
 
     pub fn toggle_bash_prefix(&mut self) {
-        let cur = self.composer_input.text.to_string();
+        let cur = self.composer_input.text.clone();
         let next = if let Some(rest) = cur.strip_prefix('!') {
             rest.trim_start().to_string()
         } else {

@@ -1,7 +1,7 @@
 //! Session, harness, runtime and system controls in the right-hand drawer.
 
 use pa_core::refinement::{HarnessScope, RefinementKind};
-use rune::{Color, Cursor, Cx, El, ScrollSpec, TextStyle, col, el, row, text};
+use rune::{Color, Cursor, Cx, El, Key, ScrollSpec, TextEdit, TextStyle, col, el, row, text};
 
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
@@ -9,8 +9,8 @@ use crate::state::{
     ActiveModal, ActiveSessionRow, RlmChildRow, format_tokens_compact, truncate_chars,
 };
 use crate::theme::{InspectorTab, Palette};
-use crate::ui::panel_controls::{button, icon_button, label};
-use crate::ui::text_input::field;
+use crate::ui::panel_controls::{button, control, icon_button, label};
+use crate::ui::text_input;
 use crate::ui::workspace::PrimeDesktopView;
 
 pub(super) const INSPECTOR_WIDTH: f32 = 328.0;
@@ -22,22 +22,22 @@ const KINDS: [(RefinementKind, &str); 4] = [
 ];
 
 fn caption(value: impl Into<String>, color: Color) -> El {
-    label(value, 12.0, 400.0, color).wrap_anywhere()
+    label(value, 13.0, 400.0, color).wrap_anywhere()
 }
 
 fn heading(value: impl Into<String>, p: Palette) -> El {
-    label(value, 11.0, 600.0, p.text_muted)
+    label(value, 14.0, 600.0, p.text_primary)
 }
 
 fn stack() -> El {
-    col().w_full().gap(10.0)
+    col().w_full().gap(14.0)
 }
 
 fn card(p: Palette) -> El {
     col()
         .w_full()
-        .padding(11.0)
-        .gap(8.0)
+        .padding(13.0)
+        .gap(10.0)
         .radius(10.0)
         .border(1.0, p.border_subtle)
         .fill(p.bg_elevated)
@@ -45,6 +45,44 @@ fn card(p: Palette) -> El {
 
 fn actions() -> El {
     row().center_y().flex_wrap().gap(5.0)
+}
+
+fn field(
+    key: &str,
+    edit: &TextEdit,
+    placeholder: &str,
+    p: Palette,
+    access: fn(&mut PrimeDesktopView) -> &mut TextEdit,
+) -> El {
+    text_input::field(key, edit, placeholder, p, access)
+        .min_h(34.0)
+        .px(9.0)
+        .py(6.0)
+        .radius(7.0)
+        .fill(p.bg_code)
+        .border(1.0, p.border_strong)
+}
+
+fn empty_state(title: &str, detail: &str, p: Palette) -> El {
+    col()
+        .w_full()
+        .gap(5.0)
+        .padding(14.0)
+        .radius(9.0)
+        .border(1.0, p.border_subtle)
+        .child(label(title, 13.5, 550.0, p.text_primary))
+        .child(caption(detail, p.text_secondary))
+}
+
+fn primary_action(key: &str, title: &str, p: Palette, press: fn(&mut PrimeDesktopView)) -> El {
+    control(key, title, p)
+        .h(30.0)
+        .px(10.0)
+        .center()
+        .fill(p.accent)
+        .hover(p.accent_hover)
+        .child(label(title, 12.0, 600.0, p.text_on_accent))
+        .on_press(press)
 }
 
 fn action_base(key: impl Into<String>, label: &str, p: Palette) -> El {
@@ -62,16 +100,26 @@ fn action(
 
 fn option(
     key: impl Into<String>,
-    label: &str,
+    title: &str,
     selected: bool,
     p: Palette,
     press: impl Fn(&mut PrimeDesktopView) + 'static,
 ) -> El {
-    let fill = if selected { p.bg_selected } else { p.bg_hover };
-    action(key, label, p, press)
+    let ink = if selected { p.accent } else { p.text_secondary };
+    control(key, title, p)
         .role("radio")
+        .focus_selected(selected)
         .checked(selected)
-        .fill(fill)
+        .fill(if selected {
+            p.bg_selected
+        } else {
+            Color::TRANSPARENT
+        })
+        .center()
+        .h(27.0)
+        .px(6.5)
+        .child(label(title, 12.0, if selected { 600. } else { 450. }, ink))
+        .on_press(press)
 }
 
 fn confirm_request(
@@ -81,7 +129,7 @@ fn confirm_request(
     request: BridgeRequest,
 ) {
     view.confirm(message, label, move |workspace| {
-        workspace.bridge.send(request)
+        workspace.bridge.send(request);
     });
 }
 
@@ -100,18 +148,46 @@ impl PrimeDesktopView {
         let p = Palette::for_mode(self.prefs.theme);
         let active = self.prefs.inspector_tab;
         let tabs = row()
-            .gap(3.0)
-            .radius(8.0)
-            .padding(3.0)
-            .fill(p.bg_code)
+            .w_full()
+            .px(12.0)
+            .gap(1.0)
+            .role("tablist")
+            .focus_group()
+            .label("Inspector views")
             .children(InspectorTab::ALL.into_iter().map(|tab| {
-                option(
-                    format!("insp-tab-{}", tab.label()),
-                    tab.label(),
-                    tab == active,
-                    p,
-                    move |s| s.set_inspector_tab(tab),
-                )
+                let selected = tab == active;
+                let ink = if selected {
+                    p.text_primary
+                } else {
+                    p.text_secondary
+                };
+                let marker = if selected {
+                    p.accent
+                } else {
+                    Color::TRANSPARENT
+                };
+                control(format!("insp-tab-{}", tab.label()), tab.label(), p)
+                    .role("tab")
+                    .focus_selected(selected)
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .h(34.0)
+                    .child(
+                        col()
+                            .w_full()
+                            .h_full()
+                            .items_center()
+                            .justify_between()
+                            .child(el().h(1.0))
+                            .child(label(
+                                tab.label(),
+                                12.5,
+                                if selected { 600.0 } else { 450.0 },
+                                ink,
+                            ))
+                            .child(el().w(24.0).h(2.0).radius(1.0).fill(marker)),
+                    )
+                    .on_press(move |s: &mut Self| s.set_inspector_tab(tab))
             }));
         let refresh = icon_button("insp-refresh-btn", "Refresh inspector", Icon::Refresh, p)
             .on_press(|s: &mut Self| {
@@ -123,9 +199,10 @@ impl PrimeDesktopView {
                 }
             });
         let body = if self.session.active_session_id.is_empty() && active != InspectorTab::Harness {
-            caption(
-                "Start or open a chat to inspect this session.",
-                p.text_muted,
+            empty_state(
+                "No active chat",
+                "Start a chat or open one from history to inspect its session.",
+                p,
             )
         } else {
             match active {
@@ -144,13 +221,20 @@ impl PrimeDesktopView {
             .fill(p.bg_inspector)
             .child(
                 row()
-                    .h(52.0)
-                    .px(10.0)
+                    .w_full()
+                    .px(16.0)
+                    .h(54.0)
                     .center_y()
                     .justify_between()
-                    .child(tabs)
-                    .child(refresh),
+                    .child(label("Inspector", 18.0, 600.0, p.text_primary))
+                    .child(
+                        row().center_y().gap(3.0).child(refresh).child(
+                            icon_button("inspector-close", "Close inspector", Icon::Close, p)
+                                .on_press(Self::toggle_inspector),
+                        ),
+                    ),
             )
+            .child(tabs)
             .child(el().w_full().h(1.0).fill(p.border_subtle))
             .child(
                 col()
@@ -161,7 +245,7 @@ impl PrimeDesktopView {
                     .scroll(ScrollSpec {
                         stick_bottom: false,
                     })
-                    .child(col().w_full().padding(12.0).child(body)),
+                    .child(col().w_full().padding(16.0).child(body)),
             )
     }
 
@@ -194,7 +278,7 @@ impl PrimeDesktopView {
             );
         }
         body = body.child(heading(
-            format!("DIRECT SUBAGENTS ({})", children.rows.len()),
+            format!("Direct subagents ({})", children.rows.len()),
             p,
         ));
         if let Some(error) = &children.load_error {
@@ -333,20 +417,24 @@ impl PrimeDesktopView {
         };
         if let Some((title, message, confirm, request)) = destructive {
             controls = controls.child(action(format!("child-{title}-{id}"), title, p, move |s| {
-                confirm_request(s, &message, confirm, request.clone())
+                confirm_request(s, &message, confirm, request.clone());
             }));
         }
         content = content.child(controls);
         if live.is_some_and(|row| self.agent_mail_target.as_deref() == Some(&row.active_session_id))
         {
             content = content
-                .child(field(
-                    "agent-mail",
-                    &self.agent_mail_input,
-                    "Message to subagent",
-                    p,
-                    |s| &mut s.agent_mail_input,
-                ))
+                .child(
+                    field(
+                        "agent-mail",
+                        &self.agent_mail_input,
+                        "Message subagent or peer…",
+                        p,
+                        |s| &mut s.agent_mail_input,
+                    )
+                    .single_line()
+                    .on_submit(|s: &mut Self, _| s.submit_agent_mail()),
+                )
                 .child(
                     actions()
                         .child(action("mail-cancel", "Cancel", p, Self::close_mail))
@@ -360,43 +448,50 @@ impl PrimeDesktopView {
         let scope = self.harness_scope;
         let mut body = stack()
             .child(
-                actions()
-                    .children(
-                        [
-                            (HarnessScope::Global, "Global"),
-                            (HarnessScope::Local, "Session Local"),
-                        ]
-                        .map(|(value, label)| {
-                            option(
-                                format!("scope-{label}"),
-                                label,
-                                value == scope,
-                                p,
-                                move |s| s.harness_scope = value,
-                            )
-                        }),
-                    )
-                    .child(action(
+                row()
+                    .w_full()
+                    .center_y()
+                    .justify_between()
+                    .child(label("Scope", 13.0, 500.0, p.text_secondary))
+                    .child(
+                        row()
+                            .role("radiogroup")
+                            .focus_group()
+                            .label("Harness scope")
+                            .gap(2.0)
+                            .padding(3.0)
+                            .radius(8.0)
+                            .fill(p.bg_code)
+                            .border(1.0, p.border_subtle)
+                            .children(
+                                [
+                                    (HarnessScope::Global, "Global", "Global"),
+                                    (HarnessScope::Local, "Session Local", "This chat"),
+                                ]
+                                .map(|(value, key, name)| {
+                                    option(
+                                        format!("scope-{key}"),
+                                        name,
+                                        value == scope,
+                                        p,
+                                        move |s| s.harness_scope = value,
+                                    )
+                                }),
+                            ),
+                    ),
+            )
+            .child(el().w_full().h(1.0).fill(p.border_subtle))
+            .child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .justify_between()
+                    .child(heading("Entries", p))
+                    .child(primary_action(
                         "harness-new",
-                        "+ New",
+                        "New entry",
                         p,
                         Self::open_new_harness_editor,
-                    )),
-            )
-            .child(
-                card(p)
-                    .child(field(
-                        "refine-input",
-                        &self.refine_input,
-                        "Refinement instructions",
-                        p,
-                        |s| &mut s.refine_input,
-                    ))
-                    .child(action(
-                        "harness-refine",
-                        "Refine",
-                        p,
-                        Self::submit_refinement,
                     )),
             );
         if self.harness_editor_open {
@@ -419,27 +514,43 @@ impl PrimeDesktopView {
                             p,
                             |s| &mut s.harness_title_input,
                         )
-                        .single_line(),
+                        .single_line()
+                        .on_submit(|s: &mut Self, _| s.focus_input(|s| &mut s.harness_body_input)),
                     )
                     .child(
                         field(
                             "harness-body",
                             &self.harness_body_input,
-                            "Entry content",
+                            "Entry content / policy / instructions…",
                             p,
                             |s| &mut s.harness_body_input,
                         )
+                        .font(TextStyle::new(13.0, 400.0).mono().lh(20.0))
+                        .on_key(|s: &mut Self, event, _| {
+                            if event.key == Key::Enter && event.mods.cmd {
+                                s.save_harness_editor();
+                                return true;
+                            }
+                            false
+                        })
+                        .on_submit(|s: &mut Self, _| s.harness_body_input.insert("\n"))
                         .min_h(64.0),
                     )
                     .child(
                         actions()
+                            .justify_end()
                             .child(action(
                                 "editor-cancel",
                                 "Cancel",
                                 p,
                                 Self::close_harness_editor,
                             ))
-                            .child(action("editor-save", "Save", p, Self::save_harness_editor)),
+                            .child(primary_action(
+                                "editor-save",
+                                "Save entry",
+                                p,
+                                Self::save_harness_editor,
+                            )),
                     ),
             );
         }
@@ -472,7 +583,25 @@ impl PrimeDesktopView {
             })
             .peekable();
         if entries.peek().is_none() {
-            body = body.child(caption("No harness entries in this scope.", p.text_muted));
+            body = body.child(if self.harness_kind_filter.is_some() {
+                empty_state(
+                    "No matching entries",
+                    "Choose All to see the other entry types.",
+                    p,
+                )
+            } else if scope == HarnessScope::Global {
+                empty_state(
+                    "No global entries yet",
+                    "Add a memory, prompt, skill or subagent to use across chats.",
+                    p,
+                )
+            } else {
+                empty_state(
+                    "No entries for this chat",
+                    "Entries saved here apply only to this session.",
+                    p,
+                )
+            });
         }
         for entry in entries {
             let kind = entry.kind;
@@ -512,8 +641,38 @@ impl PrimeDesktopView {
                     ),
             );
         }
+        let can_refine = !self.session.active_session_id.is_empty();
+        let run = action_base("harness-refine", "Run refinement", p);
+        let mut refinement = col()
+            .w_full()
+            .gap(9.0)
+            .child(el().w_full().h(1.0).fill(p.border_subtle))
+            .child(heading("Refinement", p))
+            .child(
+                field(
+                    "refine-input",
+                    &self.refine_input,
+                    "Optional refinement focus…",
+                    p,
+                    |s| &mut s.refine_input,
+                )
+                .single_line()
+                .on_submit(|s: &mut Self, _| s.submit_refinement()),
+            );
+        if !can_refine {
+            refinement = refinement.child(caption(
+                "Open a chat to run a refinement on its history.",
+                p.text_secondary,
+            ));
+        }
+        let run = if can_refine {
+            run.on_press(Self::submit_refinement)
+        } else {
+            run.disabled(true).cursor(Cursor::Default).opacity(0.55)
+        };
+        body = body.child(refinement.child(actions().justify_end().child(run)));
         if !self.harness.history.is_empty() {
-            body = body.child(heading("RECENT REFINEMENTS", p));
+            body = body.child(heading("Recent refinements", p));
         }
         for revision in self.harness.history.iter().take(6) {
             let mut revision_card = card(p)
@@ -552,15 +711,16 @@ impl PrimeDesktopView {
         let mut body = stack()
             .child(
                 card(p)
-                    .child(heading("RUN SHELL COMMAND IN SESSION CWD", p))
+                    .child(heading("Run in session directory", p))
                     .child(
                         field(
                             "quick-bash",
                             &self.quick_bash_input,
-                            "Shell command",
+                            "cargo test --workspace",
                             p,
                             |s| &mut s.quick_bash_input,
                         )
+                        .font(TextStyle::new(13.0, 400.0).mono().lh(20.0))
                         .single_line()
                         .on_submit(|s: &mut Self, _| s.submit_quick_bash()),
                     )
@@ -571,10 +731,7 @@ impl PrimeDesktopView {
                         Self::submit_quick_bash,
                     )),
             )
-            .child(heading(
-                format!("KERNEL & PERSISTENT SHELLS ({})", self.shells.len()),
-                p,
-            ));
+            .child(heading(format!("Shells ({})", self.shells.len()), p));
         if self.shells.is_empty() {
             body = body.child(caption("No shells in this session.", p.text_muted));
         }
@@ -629,26 +786,32 @@ impl PrimeDesktopView {
         }
         let mut schedules = card(p)
             .child(heading(
-                format!("HEARTBEATS & SCHEDULES ({})", self.schedules.len()),
+                format!("Heartbeats and schedules ({})", self.schedules.len()),
                 p,
             ))
             .child(
                 field(
                     "schedule-interval",
                     &self.schedule_interval_input,
-                    "Interval",
+                    "every 10m",
                     p,
                     |s| &mut s.schedule_interval_input,
                 )
-                .single_line(),
+                .font(TextStyle::new(13.0, 400.0).mono().lh(20.0))
+                .single_line()
+                .on_submit(|s: &mut Self, _| s.submit_heartbeat()),
             )
-            .child(field(
-                "schedule-prompt",
-                &self.schedule_prompt_input,
-                "Heartbeat prompt",
-                p,
-                |s| &mut s.schedule_prompt_input,
-            ))
+            .child(
+                field(
+                    "schedule-prompt",
+                    &self.schedule_prompt_input,
+                    "Check status & report…",
+                    p,
+                    |s| &mut s.schedule_prompt_input,
+                )
+                .single_line()
+                .on_submit(|s: &mut Self, _| s.submit_heartbeat()),
+            )
             .child(action(
                 "add-heartbeat",
                 "Add heartbeat",
@@ -714,7 +877,7 @@ impl PrimeDesktopView {
             .map_or_else(|| "—".to_owned(), format_tokens_compact);
         let mut body = stack().child(
             card(p)
-                .child(heading("SESSION TELEMETRY", p))
+                .child(heading("Session usage", p))
                 .child(stat("Context window", context, p))
                 .child(stat(
                     "Input / Output",
@@ -746,11 +909,11 @@ impl PrimeDesktopView {
                         .child(action("system-reload", "Reload session", p, |s| {
                             s.bridge.send(BridgeRequest::ReloadSession {
                                 active_session_id: s.session.active_session_id.clone(),
-                            })
+                            });
                         })),
                 ),
         );
-        let mut policies = card(p).child(heading("POLICIES", p));
+        let mut policies = card(p).child(heading("Policies", p));
         for (is_retry, label, value) in [
             (false, "Auto-compaction", telemetry.auto_compaction),
             (true, "Auto-retry on transient errors", telemetry.auto_retry),
@@ -796,9 +959,9 @@ impl PrimeDesktopView {
                 .w_full()
                 .center_y()
                 .justify_between()
-                .child(heading("PROVIDERS", p))
+                .child(heading("Providers", p))
                 .child(action("system-provider-settings", "Manage", p, |s| {
-                    s.open_modal(ActiveModal::SettingsAuth)
+                    s.open_modal(ActiveModal::SettingsAuth);
                 })),
         );
         for provider in self.provider_auth.iter().take(5) {
@@ -818,7 +981,7 @@ impl PrimeDesktopView {
                     )),
             );
         }
-        let mut mcp = card(p).child(heading(format!("MCP SERVERS ({})", self.mcp_rows.len()), p));
+        let mut mcp = card(p).child(heading(format!("MCP servers ({})", self.mcp_rows.len()), p));
         for item in &self.mcp_rows {
             let request = BridgeRequest::RemoveMcp {
                 active_session_id: self.session.active_session_id.clone(),
@@ -848,16 +1011,24 @@ impl PrimeDesktopView {
         }
         mcp = mcp
             .child(
-                field("mcp-server", &self.mcp_server_input, "Server", p, |s| {
-                    &mut s.mcp_server_input
-                })
-                .single_line(),
+                field(
+                    "mcp-server",
+                    &self.mcp_server_input,
+                    "Server name",
+                    p,
+                    |s| &mut s.mcp_server_input,
+                )
+                .font(TextStyle::new(13.0, 400.0).mono().lh(20.0))
+                .single_line()
+                .on_submit(|s: &mut Self, _| s.submit_mcp_token()),
             )
             .child(
-                field("mcp-token", &self.mcp_token_input, "Access token", p, |s| {
+                field("mcp-token", &self.mcp_token_input, "Bearer token", p, |s| {
                     &mut s.mcp_token_input
                 })
-                .single_line(),
+                .font(TextStyle::new(13.0, 400.0).mono().lh(20.0))
+                .single_line()
+                .on_submit(|s: &mut Self, _| s.submit_mcp_token()),
             )
             .child(action(
                 "set-mcp-token",
@@ -876,7 +1047,7 @@ impl PrimeDesktopView {
                             .center_y()
                             .justify_between()
                             .child(heading(
-                                format!("SYSTEM PROMPT ({} chars)", prompt.chars().count()),
+                                format!("System prompt ({} chars)", prompt.chars().count()),
                                 p,
                             ))
                             .child(

@@ -134,7 +134,7 @@ impl PrimeDesktopView {
                     }
                     Ok(_) => {
                         view.toast =
-                            Some(("Attachments exceed the limit for one prompt.".into(), true))
+                            Some(("Attachments exceed the limit for one prompt.".into(), true));
                     }
                     Err(err) => view.toast = Some((err.to_string(), true)),
                 }

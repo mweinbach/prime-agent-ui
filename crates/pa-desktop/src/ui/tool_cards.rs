@@ -1,7 +1,7 @@
 //! Expandable tool calls, diffs and console output in the session timeline.
 
 use pa_types::ai::is_python_tool_name;
-use rune::{Color, El, col, row};
+use rune::{Color, El, TextStyle, col, el, row};
 
 use super::selectable_text::{control, copy_button, label};
 use super::syntax::{code_text, strip_ansi};
@@ -44,12 +44,12 @@ pub(super) fn render_tool_card(view: &PrimeDesktopView, card: &ToolCard, p: Pale
     let open = view
         .session
         .is_expanded(&key, detail.expand_tool_output() || card.is_error);
-    let (kind, lang) = match card.name.as_str() {
-        name if is_python_tool_name(name) => ("Python", Some("python")),
-        "bash" => ("Shell", Some("sh")),
-        "edit" => ("Edit", None),
-        "attach_image" => ("Image", None),
-        name => (name, None),
+    let (kind, lang, icon) = match card.name.as_str() {
+        name if is_python_tool_name(name) => ("Python", Some("python"), Icon::Cpu),
+        "bash" => ("Shell", Some("sh"), Icon::Terminal),
+        "edit" => ("Edit", None, Icon::EditPen),
+        "attach_image" => ("Image", None, Icon::Image),
+        other => (other, None, Icon::Zap),
     };
     let first = card
         .code_or_cmd
@@ -80,7 +80,7 @@ pub(super) fn render_tool_card(view: &PrimeDesktopView, card: &ToolCard, p: Pale
             p.success,
         )
     } else if card.settled {
-        ("Done".into(), p.text_muted)
+        ("Done".into(), p.success)
     } else {
         ("Streaming…".into(), p.accent)
     };
@@ -89,27 +89,72 @@ pub(super) fn render_tool_card(view: &PrimeDesktopView, card: &ToolCard, p: Pale
         .edit_diff
         .as_ref()
         .map_or(card.code_or_cmd.as_str(), |d| d.unified.as_str());
-    let header = row()
+    let id = key.clone();
+    let mut toggle = control(&format!("{key}-hdr"), &title, p)
+        .grow(1.)
+        .min_w(0.)
+        .justify_start()
+        .gap(9.)
+        .px(2.)
+        .py(2.)
+        .expanded(open)
+        .on_press(move |s: &mut PrimeDesktopView| s.session.set_expanded(&id, !open))
+        .child(
+            row()
+                .size(28., 28.)
+                .center()
+                .radius(8.)
+                .fill(p.bg_sidebar)
+                .child(icon.render(15., p.text_secondary)),
+        )
+        .child(label(kind, 13., p.text_primary).font(TextStyle::new(13., 600.)))
+        .child(
+            if open {
+                Icon::ChevronDown
+            } else {
+                Icon::ChevronRight
+            }
+            .render(11., p.text_muted),
+        );
+    if !open && !first.is_empty() {
+        toggle = toggle.child(
+            label(first.trim(), 12., p.text_secondary)
+                .min_w(0.)
+                .shrink()
+                .truncate(),
+        );
+    }
+    let status_chip = row()
+        .h(23.)
+        .gap(5.)
+        .px(7.)
+        .center_y()
+        .radius(7.)
+        .fill(ink.alpha(0.10))
+        .child(el().size(5., 5.).radius(3.).fill(ink))
+        .child(label(status, 11.5, ink));
+    let mut header = row()
         .w_full()
         .center_y()
-        .gap(5.)
-        .child(disclosure(&key, &title, open, p).min_w(0.).shrink())
-        .child(rune::el().grow(1.))
-        .child(label(status, 11., ink))
-        .child(copy_button(&format!("{key}-copy"), copy, p));
+        .gap(7.)
+        .child(toggle)
+        .child(status_chip);
+    if !open && !copy.is_empty() {
+        header = header.child(copy_button(&format!("{key}-copy"), copy, p));
+    }
     let mut body = col()
         .key(&key)
         .w_full()
-        .gap(4.)
-        .padding(7.)
-        .radius(9.)
+        .gap(8.)
+        .padding(10.)
+        .radius(13.)
         .fill(p.bg_elevated)
         .border(
             1.,
             if card.is_error {
                 p.danger
             } else {
-                p.border_subtle
+                p.border_strong
             },
         )
         .child(header);
@@ -117,7 +162,11 @@ pub(super) fn render_tool_card(view: &PrimeDesktopView, card: &ToolCard, p: Pale
         body = body.child(console(
             view,
             &format!("{key}-src"),
-            "Source",
+            if card.name == "bash" {
+                "Command"
+            } else {
+                "Source"
+            },
             &card.code_or_cmd,
             lang,
             36,
@@ -242,16 +291,23 @@ pub(super) fn console(
     let mut body = col()
         .w_full()
         .min_w(0.)
-        .radius(6.)
+        .radius(8.)
+        .hover_group()
         .fill(p.bg_code)
-        .px(9.)
-        .py(6.)
+        .px(12.)
+        .py(8.)
+        .gap(3.)
         .child(
             row()
                 .justify_between()
                 .center_y()
-                .child(label(title, 11.5, p.text_secondary).min_w(0.).shrink())
-                .child(copy_button(&format!("{key}-copy"), &clean, p)),
+                .child(
+                    label(title, 12., p.text_secondary)
+                        .font(TextStyle::new(12., 600.))
+                        .min_w(0.)
+                        .shrink(),
+                )
+                .child(copy_button(&format!("{key}-copy"), &clean, p).group_opacity(0.55, 1.)),
         )
         .child(
             col()
@@ -268,4 +324,61 @@ pub(super) fn console(
         body = body.child(disclosure(key, &caption, expanded, p).self_start());
     }
     body
+}
+
+#[cfg(test)]
+mod tests {
+    use super::console;
+    use crate::theme::{Palette, ThemeMode};
+    use crate::ui::workspace::{LaunchOptions, PrimeDesktopView};
+    use rune::{Env, Runtime, clipboard, col};
+    use tempfile::TempDir;
+
+    #[test]
+    fn collapsed_console_copies_all_lines_and_can_expand() {
+        const OUTPUT: &str = "\x1b[32mfirst\x1b[0m\n\nthird\nlast";
+        let profile = TempDir::new().unwrap();
+        let options = LaunchOptions {
+            initial_cwd: Some(profile.path().into()),
+            daemon_socket: Some(profile.path().join("isolated.sock")),
+            ..LaunchOptions::default()
+        };
+        let view = PrimeDesktopView::new(options, profile.path().into());
+        let mut app = Runtime::new(
+            view,
+            |view, _| {
+                col().w_full().child(console(
+                    view,
+                    "test",
+                    "Output",
+                    OUTPUT,
+                    None,
+                    2,
+                    Palette::for_mode(ThemeMode::Light),
+                ))
+            },
+            (280., 240.),
+            Env::new(false, 1.),
+        );
+        let board = clipboard::memory();
+        app.use_clipboard(&board);
+        app.frame(0.);
+        let output = |app: &Runtime<PrimeDesktopView>| {
+            app.elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some("test-text"))
+                .unwrap()
+                .text
+                .unwrap()
+        };
+        assert_eq!(output(&app), "first\n");
+        for key in ["test-copy", "test-hdr"] {
+            let (x, y) = app.find(key).unwrap();
+            app.pointer_down(x, y);
+            app.pointer_up(x, y);
+            app.frame(0.);
+        }
+        assert_eq!(board.text().unwrap().as_str(), "first\n\nthird\nlast");
+        assert_eq!(output(&app), "first\n\nthird\nlast");
+    }
 }

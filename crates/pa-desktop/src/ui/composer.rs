@@ -1,9 +1,9 @@
 //! Prompt editing, slash completion, staged attachments and live turn controls.
 
-use rune::{El, Key, KeyEvent, auto_grow, col, el, row};
+use rune::{Cx, El, Key, KeyEvent, auto_grow, col, row};
 
 use super::selectable_text::{control, icon_control, label};
-use super::text_input::field;
+use super::text_input::{LINE_HEIGHT, dismiss, field};
 use super::workspace::PrimeDesktopView;
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
@@ -47,7 +47,7 @@ pub(super) fn slash_matches(draft: &str) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-pub(super) fn composer(view: &PrimeDesktopView, p: Palette) -> El {
+pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktopView>) -> El {
     let draft = &view.composer_input.text;
     let shell = draft.trim_start().starts_with('!');
     let mut section = col()
@@ -86,15 +86,27 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette) -> El {
         }
         section = section.child(options);
     }
+    let focused = view.composer_input.focused;
+    let border = if shell {
+        p.warning
+    } else if focused {
+        p.accent.mix(p.bg_elevated, 0.25)
+    } else {
+        p.border_strong
+    };
     let mut card = col()
         .w_full()
-        .gap(10.)
-        .px(16.)
-        .pt(15.)
-        .pb(10.)
+        .gap(12.)
+        .px(18.)
+        .pt(18.)
+        .pb(12.)
         .fill(p.bg_elevated)
-        .radius(15.)
-        .border(1., if shell { p.warning } else { p.border_strong });
+        .radius(19.)
+        .border(1., border)
+        .shadow(3., 10., rune::Color::BLACK.alpha(0.09));
+    if focused {
+        card = card.outline(2., 1., p.accent.alpha(0.09));
+    }
     if !view.staged_images.is_empty() {
         let mut attachments = row().flex_wrap().gap(6.);
         for (i, image) in view.staged_images.iter().enumerate() {
@@ -117,6 +129,19 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette) -> El {
         }
         card = card.child(attachments);
     }
+    // Up/Down move through wrapped text normally. Only the outermost visual lines
+    // recall history, including the ends of a long scrolled draft.
+    let edge_lines = cx
+        .window_layout("composer-input")
+        .zip(cx.caret("composer-input"))
+        .map(|([_, top, _, height], [_, caret, _, caret_height])| {
+            let center = caret + caret_height / 2.;
+            (
+                center < top + LINE_HEIGHT,
+                center > top + height - LINE_HEIGHT,
+            )
+        })
+        .unwrap_or_default();
     let input = field(
         "composer-input",
         &view.composer_input,
@@ -124,22 +149,35 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette) -> El {
         p,
         |s| &mut s.composer_input,
     )
+    .font(rune::TextStyle::new(15., 400.).lh(LINE_HEIGHT))
     .no_focus_ring()
+    .on_input_change(|s: &mut PrimeDesktopView, _| s.composer_edited())
     .on_submit(|s: &mut PrimeDesktopView, _| submit(s))
-    .on_input_key(|s: &mut PrimeDesktopView, event, _| composer_key(s, event));
+    .on_input_key(move |s: &mut PrimeDesktopView, event, _| composer_key(s, event, edge_lines));
 
     let mut tools = row()
         .min_w(0.)
         .items_center()
-        .gap(3.)
+        .gap(6.)
         .flex_wrap()
         .child(
-            icon_control("composer-attach-img-btn", "Attach images", Icon::Image, p)
+            control("composer-attach-img-btn", "Attach images", p)
+                .help("Attach images")
+                .size(32., 32.)
+                .padding(0.)
+                .radius(10.)
+                .border(1., p.border_strong)
+                .child(Icon::Plus.render(17., p.text_secondary))
                 .on_press(PrimeDesktopView::prompt_attach_images),
         )
-        .child(el().w(1.).h(15.).fill(p.border_subtle))
         .child(
             control("composer-model-pill", "Select model", p)
+                .h(32.)
+                .gap(6.)
+                .px(10.)
+                .radius(10.)
+                .fill(p.bg_sidebar)
+                .child(Icon::Cpu.render(13., p.text_secondary))
                 .child(
                     label(
                         view.session.model_id.as_deref().unwrap_or("Select model"),
@@ -196,16 +234,17 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette) -> El {
                     .on_press(|s: &mut PrimeDesktopView| {
                         s.bridge.send(BridgeRequest::AbortSession {
                             active_session_id: s.session.active_session_id.clone(),
-                        })
+                        });
                     }),
             );
     } else {
         let enabled = !draft.trim().is_empty() || !view.staged_images.is_empty();
         actions = actions.child(
             control("composer-send-btn", "Send message", p)
-                .size(30., 30.)
+                .size(34., 34.)
                 .padding(0.)
-                .radius(15.)
+                .radius(11.)
+                .help("Send message")
                 .fill(if enabled { p.accent } else { p.bg_user_bubble })
                 .disabled(!enabled)
                 .child(Icon::Send.render(
@@ -219,16 +258,26 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette) -> El {
                 .on_press(PrimeDesktopView::submit_composer),
         );
     }
-    card = card.child(auto_grow(input, 2, 7)).child(
-        row()
-            .w_full()
-            .center_y()
-            .justify_between()
-            .flex_wrap()
-            .gap(5.)
-            .child(tools)
-            .child(actions),
-    );
+    card = card
+        .child(auto_grow(
+            input,
+            if view.session.entries.is_empty() {
+                3
+            } else {
+                2
+            },
+            7,
+        ))
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .justify_between()
+                .flex_wrap()
+                .gap(5.)
+                .child(tools)
+                .child(actions),
+        );
     section.child(card)
 }
 
@@ -238,12 +287,15 @@ fn submit(s: &mut PrimeDesktopView) {
     }
 }
 
-fn composer_key(s: &mut PrimeDesktopView, event: &KeyEvent) -> bool {
-    if event.mods.shift || event.mods.alt {
+fn composer_key(s: &mut PrimeDesktopView, event: &KeyEvent, edge_lines: (bool, bool)) -> bool {
+    if event.mods.shift || event.mods.alt || s.composer_input.preedit.is_some() {
         return false;
     }
     // Explicitly keep plain Return as Send, including inside code/list-looking prompts.
-    if event.key == Key::Enter && s.composer_input.preedit.is_none() {
+    if dismiss(s, event) {
+        return true;
+    }
+    if event.key == Key::Enter {
         submit(s);
         return true;
     }
@@ -263,8 +315,8 @@ fn composer_key(s: &mut PrimeDesktopView, event: &KeyEvent) -> bool {
     }
     let edit = &s.composer_input;
     if edit.anchor == edit.focus
-        && ((event.key == Key::Up && edit.focus == 0)
-            || (event.key == Key::Down && edit.focus == edit.text.len()))
+        && ((event.key == Key::Up && (edit.focus == 0 || edge_lines.0))
+            || (event.key == Key::Down && (edit.focus == edit.text.len() || edge_lines.1)))
     {
         return s.composer_history(event.key == Key::Up);
     }
@@ -302,7 +354,7 @@ fn queued(s: &PrimeDesktopView, p: Palette) -> El {
                 .on_press(|s: &mut PrimeDesktopView| {
                     s.bridge.send(BridgeRequest::AbortAndSendQueued {
                         active_session_id: s.session.active_session_id.clone(),
-                    })
+                    });
                 }),
         )
         .child(
@@ -311,7 +363,7 @@ fn queued(s: &PrimeDesktopView, p: Palette) -> El {
                 .on_press(|s: &mut PrimeDesktopView| {
                     s.bridge.send(BridgeRequest::ClearQueue {
                         active_session_id: s.session.active_session_id.clone(),
-                    })
+                    });
                 }),
         )
 }

@@ -195,7 +195,7 @@ impl OutlineRow {
                         .hover(p.bg_hover)
                         .cursor(rune::Cursor::Pointer)
                         .on_press(|s: &mut PrimeDesktopView| {
-                            s.sidebar_history_open = !s.sidebar_history_open
+                            s.sidebar_history_open = !s.sidebar_history_open;
                         });
                 }
                 header

@@ -2,7 +2,7 @@
 
 use std::borrow::Cow;
 
-use rune::{Cx, El, Family, GrowthSpec, Key, ScrollSpec, TextStyle, col, el, row, text};
+use rune::{Cx, El, Family, GrowthSpec, ScrollSpec, TextStyle, col, el, row, text};
 
 use super::composer::composer;
 use super::markdown::render_markdown;
@@ -29,21 +29,23 @@ impl PrimeDesktopView {
             .min_h(0.)
             .min_w(0.)
             .fill(p.bg_canvas)
-            .child(self.stage_header(cx, p));
+            .child(self.stage_header(cx, p))
+            .child(el().w_full().h(1.).fill(p.border_subtle));
         if let Some(goal) = self
             .session
             .goal
             .as_ref()
             .filter(|g| g.active || g.objective.is_some())
         {
-            let mut status = format!(
-                "{} · {}",
-                goal.status.slug(),
-                format_tokens_compact(goal.tokens_used)
-            );
-            if let Some(budget) = goal.token_budget.filter(|b| *b > 0) {
-                status.push_str(&format!(" / {}", format_tokens_compact(budget)));
-            }
+            let usage = format_tokens_compact(goal.tokens_used);
+            let status = match goal.token_budget.filter(|b| *b > 0) {
+                Some(budget) => format!(
+                    "{} · {usage} / {}",
+                    goal.status.slug(),
+                    format_tokens_compact(budget)
+                ),
+                None => format!("{} · {usage}", goal.status.slug()),
+            };
             stage = stage.child(
                 row()
                     .w_full()
@@ -70,9 +72,9 @@ impl PrimeDesktopView {
             stage = stage.child(self.side_question_bar(p));
         }
         if self.session.entries.is_empty() && !self.session.is_streaming {
-            return stage.child(self.welcome(p));
+            return stage.child(self.welcome(p, cx));
         }
-        let viewport = format!("transcript-scroll-{}", self.session.active_session_id);
+        let viewport = self.transcript_viewport_key();
         // Rune retains the reading position by turn key and follows streaming text only
         // while the reader is at the bottom. A newly attached session gets a new viewport.
         let count = self.session.entries.len() + usize::from(self.session.is_streaming);
@@ -103,7 +105,7 @@ impl PrimeDesktopView {
                     .items_center()
                     .px(24.)
                     .py(7.)
-                    .child(col().w_full().max_w(720.).min_w(0.).child(content))
+                    .child(col().w_full().max_w(704.).min_w(0.).child(content))
             });
         stage = stage.child(
             col()
@@ -136,7 +138,7 @@ impl PrimeDesktopView {
                 .px(24.)
                 .pt(8.)
                 .pb(16.)
-                .child(col().w_full().max_w(720.).child(composer(self, p))),
+                .child(col().w_full().max_w(704.).child(composer(self, p, cx))),
         )
     }
 
@@ -162,7 +164,7 @@ impl PrimeDesktopView {
                     .on_press(move |s: &mut Self| {
                         s.open_session(BridgeRequest::AttachSession {
                             active_session_id: parent.clone(),
-                        })
+                        });
                     }),
             );
         } else {
@@ -180,7 +182,7 @@ impl PrimeDesktopView {
                     .on_press(Self::reveal_current_project),
             );
         }
-        left = left.child(label("/", 12., p.text_muted));
+        left = left.child(Icon::ChevronRight.render(12., p.text_muted));
         left = if self.renaming_session && attached {
             left.child(
                 field("rename-input", &self.rename_input, "Session name", p, |s| {
@@ -189,14 +191,7 @@ impl PrimeDesktopView {
                 .single_line()
                 .grow(1.)
                 .min_w(0.)
-                .on_submit(|s: &mut Self, _| s.commit_rename_session(&s.rename_input.text.clone()))
-                .on_input_key(|s: &mut Self, ev, _| {
-                    if ev.key == Key::Escape {
-                        s.commit_rename_session("");
-                        return true;
-                    }
-                    false
-                }),
+                .on_submit(|s: &mut Self, _| s.commit_rename_session(&s.rename_input.text.clone())),
             )
         } else if attached {
             let title = self.session.display_title();
@@ -206,7 +201,8 @@ impl PrimeDesktopView {
                     .min_w(0.)
                     .help(title.clone())
                     .child(
-                        label(title, 12.5, p.text_primary)
+                        label(title, 13., p.text_primary)
+                            .font(TextStyle::new(13., 600.))
                             .shrink()
                             .min_w(0.)
                             .truncate(),
@@ -215,7 +211,11 @@ impl PrimeDesktopView {
                     .on_press(Self::begin_rename_session),
             )
         } else {
-            left.child(label("New chat", 12.5, p.text_muted).truncate())
+            left.child(
+                label("New chat", 13., p.text_primary)
+                    .font(TextStyle::new(13., 550.))
+                    .truncate(),
+            )
         };
 
         let mut right = row().items_center().gap(4.);
@@ -223,6 +223,8 @@ impl PrimeDesktopView {
             right = right
                 .child(
                     control("stage-detail-pill", "Change transcript detail", p)
+                        .radius(8.)
+                        .border(1., p.border_subtle)
                         .child(label(
                             self.prefs.detail_level.label(),
                             12.,
@@ -232,6 +234,8 @@ impl PrimeDesktopView {
                 )
                 .child(
                     control("stage-side-question-btn", "Side question", p)
+                        .radius(8.)
+                        .border(1., p.border_subtle)
                         .child(label("/btw", 12., p.text_secondary))
                         .on_press(Self::toggle_side_question),
                 );
@@ -249,6 +253,9 @@ impl PrimeDesktopView {
             );
         }
         let inspect = control("stage-toggle-inspector-btn", "Toggle inspector", p)
+            .radius(8.)
+            .px(9.)
+            .border(1., p.border_subtle)
             .child(Icon::Layers.render(14., p.text_secondary))
             .child(label("Inspector", 12., p.text_secondary))
             .on_press(Self::toggle_inspector);
@@ -273,23 +280,26 @@ impl PrimeDesktopView {
             .child(right)
     }
 
-    fn welcome(&self, p: Palette) -> El {
-        let heading = row()
-            .gap(12.)
-            .center_y()
-            .child(Icon::Prime.render(30., p.accent))
-            .child(
-                text("What are we working on?")
-                    .font(
-                        TextStyle::new(34., 450.)
-                            .family(Family::Named(font_display()))
-                            .lh(42.)
-                            .tracking(-0.8),
-                    )
-                    .color(p.text_primary)
-                    .min_w(0.)
-                    .wrap(),
-            );
+    fn welcome(&self, p: Palette, cx: &Cx<Self>) -> El {
+        let mark = row()
+            .key("welcome-mark")
+            .size(44., 44.)
+            .radius(13.)
+            .fill(p.accent_soft)
+            .center()
+            .child(Icon::Prime.render(28., p.accent));
+        let heading = col().w_full().items_start().gap(15.).child(mark).child(
+            text("What are we working on?")
+                .font(
+                    TextStyle::new(39., 480.)
+                        .family(Family::Named(font_display()))
+                        .lh(46.)
+                        .tracking(-1.3),
+                )
+                .color(p.text_primary)
+                .min_w(0.)
+                .wrap(),
+        );
         let mut starters = row().min_h(32.).gap(8.).flex_wrap();
         if self.composer_input.text.is_empty() && self.staged_images.is_empty() {
             for (key, icon, title, prompt) in [
@@ -308,18 +318,23 @@ impl PrimeDesktopView {
             ] {
                 starters = starters.child(
                     control(key, title, p)
-                        .child(icon.render(14., p.text_muted))
-                        .child(label(title, 12.5, p.text_secondary))
+                        .h(34.)
+                        .px(11.)
+                        .gap(7.)
+                        .radius(10.)
+                        .border(1., p.border_strong)
+                        .child(icon.render(15., p.accent))
+                        .child(label(title, 13., p.text_primary))
                         .on_press(move |s: &mut Self| s.populate_draft(prompt)),
                 );
             }
         }
         let content = col()
             .w_full()
-            .max_w(720.)
-            .gap(18.)
+            .max_w(704.)
+            .gap(20.)
             .child(heading)
-            .child(composer(self, p))
+            .child(composer(self, p, cx))
             .child(starters);
         col()
             .key("welcome-stage")
@@ -370,7 +385,7 @@ impl PrimeDesktopView {
                         s.bridge.send(BridgeRequest::AbortSideQuestion {
                             active_session_id: s.session.active_session_id.clone(),
                             side_question_id: id.clone(),
-                        })
+                        });
                     }),
             );
         }
@@ -422,10 +437,13 @@ impl PrimeDesktopView {
                     .self_end()
                     .max_w(640.)
                     .gap(5.)
-                    .radius(12.)
-                    .px(14.)
-                    .py(9.)
-                    .fill(p.bg_user_bubble);
+                    .min_w(0.)
+                    .shrink()
+                    .corners([16., 16., 5., 16.])
+                    .px(16.)
+                    .py(11.)
+                    .fill(p.bg_user_bubble)
+                    .border(1., p.border_subtle);
                 if let Some(skill) = skill_name {
                     bubble = bubble.child(
                         pill(&format!("skill · {skill}"), p.accent_soft, p.accent).self_start(),
@@ -439,18 +457,27 @@ impl PrimeDesktopView {
                     ));
                 }
                 if !text.is_empty() {
-                    bubble = bubble
-                        .child(
-                            label(text, 15., p.text_primary)
-                                .key(format!("{key}-text"))
-                                .font(TextStyle::new(15., 400.).lh(22.))
-                                .wrap_anywhere()
-                                .selectable(true)
-                                .selection_color(p.selection_bg),
-                        )
-                        .child(copy_button(&format!("{key}-copy"), text, p).self_end());
+                    bubble = bubble.child(
+                        label(text, 15., p.text_primary)
+                            .key(format!("{key}-text"))
+                            .font(TextStyle::new(15., 400.).lh(22.))
+                            .wrap_anywhere()
+                            .selectable(true)
+                            .selection_color(p.selection_bg),
+                    );
                 }
-                col().w_full().items_end().child(bubble)
+                let mut line = row()
+                    .hover_group()
+                    .max_w(668.)
+                    .min_w(0.)
+                    .items_center()
+                    .gap(6.);
+                if !text.is_empty() {
+                    line = line.child(
+                        copy_button(&format!("{key}-copy"), text, p).group_opacity(0.32, 1.),
+                    );
+                }
+                col().w_full().items_end().child(line.child(bubble))
             }
             TranscriptEntry::Assistant {
                 key,
@@ -459,7 +486,7 @@ impl PrimeDesktopView {
                 error,
                 ..
             } => {
-                let mut message = col().key(key).w_full().min_w(0.).gap(7.);
+                let mut message = col().w_full().min_w(0.).gap(8.);
                 let mut reply = Vec::new();
                 for (i, block) in blocks.iter().enumerate() {
                     match block {
@@ -504,12 +531,29 @@ impl PrimeDesktopView {
                     message =
                         message.child(label(error, 13., p.danger).wrap_anywhere().selectable(true));
                 }
+                let mut author = row()
+                    .w_full()
+                    .items_center()
+                    .gap(7.)
+                    .child(Icon::Prime.render(15., p.accent))
+                    .child(
+                        label("Prime Agent", 12.5, p.text_secondary)
+                            .font(TextStyle::new(12.5, 600.)),
+                    );
                 if !reply.is_empty() && !streaming {
-                    message = message.child(
-                        copy_button(&format!("{key}-copy"), &reply.join("\n\n"), p).self_start(),
+                    author = author.child(el().grow(1.)).child(
+                        copy_button(&format!("{key}-copy"), &reply.join("\n\n"), p)
+                            .group_opacity(0.4, 1.),
                     );
                 }
-                message
+                col()
+                    .key(key)
+                    .hover_group()
+                    .gap(4.)
+                    .w_full()
+                    .min_w(0.)
+                    .child(author)
+                    .child(message)
             }
             TranscriptEntry::Tool(card) => render_tool_card(self, card, p),
             TranscriptEntry::UserBash {

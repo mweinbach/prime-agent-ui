@@ -20,7 +20,8 @@ pub(super) fn control(key: impl Into<String>, title: impl Into<String>, p: Palet
         .focusable(true)
         .cursor(Cursor::Pointer)
         .hover(p.bg_hover)
-        .focus_ring(1.0, 0.0, p.accent)
+        .press(p.bg_selected)
+        .focus_ring(1.5, 0.0, p.accent)
         .radius(6.0)
 }
 

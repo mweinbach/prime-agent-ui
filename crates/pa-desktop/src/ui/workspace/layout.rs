@@ -43,7 +43,10 @@ impl PrimeDesktopView {
             .w_full()
             .h_full()
             .fill(p.bg_canvas)
-            .on_layout(|s: &mut Self, [_, _, width, _]| s.viewport_width = width)
+            .on_layout_tx(|s: &mut Self, [_, _, width, _], tx| {
+                s.viewport_width = width;
+                tx.instant();
+            })
             .child(panes);
         let left_drawer = show_left && !dock_left;
         let right_drawer = show_right && !dock_right;
@@ -88,22 +91,33 @@ impl PrimeDesktopView {
         }
         if let Some(modal) = self.active_modal(cx) {
             root = root.child(modal);
-        }
-        if let Some((message, error)) = &self.toast {
-            let color = if *error { p.danger } else { p.text_primary };
-            root = root.child(
-                control("toast-banner", "Dismiss notification", p)
-                    .pin(None, None, Some(22.0), Some(22.0))
-                    .max_w((self.viewport_width - 44.0).clamp(0.0, 420.0))
-                    .px(14.0)
-                    .py(9.0)
-                    .radius(12.0)
-                    .fill(p.bg_elevated)
-                    .border(1.0, if *error { p.danger } else { p.border_strong })
-                    .on_press(|s: &mut Self| s.toast = None)
-                    .child(label(message, 12.5, 500.0, color).wrap()),
-            );
+        } else if let Some(toast) = self.notification(p) {
+            root = root.child(toast.pin(None, None, Some(22.0), Some(22.0)));
         }
         root
+    }
+
+    pub(in crate::ui) fn notification(&self, p: Palette) -> Option<El> {
+        let (message, error) = self.toast.as_ref()?;
+        let color = if *error { p.danger } else { p.text_primary };
+        let width = (self.viewport_width - 64.0).clamp(0.0, 400.0);
+        Some(
+            control("toast-banner", "Dismiss notification", p)
+                .max_w(width)
+                .px(14.0)
+                .py(9.0)
+                .radius(12.0)
+                .fill(p.bg_elevated)
+                .border(1.0, if *error { p.danger } else { p.border_strong })
+                .on_press(|s: &mut Self| s.toast = None)
+                .child(
+                    label(message, 12.5, 500.0, color)
+                        .key("toast-message")
+                        .min_w(0.0)
+                        .max_w((width - 28.0).max(0.0))
+                        .shrink()
+                        .wrap_anywhere(),
+                ),
+        )
     }
 }

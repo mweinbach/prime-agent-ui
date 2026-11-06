@@ -30,7 +30,7 @@ impl PrimeDesktopView {
     pub(super) fn focus_active_surface(&mut self) {
         match self.active_modal {
             Some(ActiveModal::QuickSwitcher | ActiveModal::ModelPicker) => {
-                self.focus_input(|s| &mut s.modal_search_input)
+                self.focus_input(|s| &mut s.modal_search_input);
             }
             Some(ActiveModal::SettingsAuth) => self.focus_input(|s| &mut s.api_key_input),
             None => self.focus_input(|s| &mut s.composer_input),

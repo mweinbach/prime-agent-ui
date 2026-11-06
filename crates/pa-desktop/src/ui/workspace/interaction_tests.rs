@@ -93,6 +93,15 @@ fn search_and_completion_keys_act_on_the_highlighted_row() {
         key(&mut app, k, false);
     }
     assert_eq!(app.state.composer_input.text, "/refine");
+
+    app.state.populate_draft("/");
+    app.invalidate();
+    app.frame(0.);
+    for k in [Key::Down, Key::Text("c".into()), Key::Enter] {
+        key(&mut app, k, false);
+    }
+    assert_eq!(app.state.composer_input.text, "/compact");
+
     app.state.populate_draft("/mo");
     app.invalidate();
     app.frame(0.);
@@ -212,7 +221,10 @@ fn resizing_a_docked_sidebar_to_a_drawer_keeps_the_stage_usable() {
     assert!(app.find("sidebar-drawer").is_some());
     assert!(app.find("drawer-scrim").is_some());
     let (narrow, _) = app.presented("center-pane").unwrap();
-    assert!(narrow[0].abs() < 1. && (narrow[2] - 660.).abs() < 1.);
+    assert!(
+        narrow[0].abs() < 1. && (narrow[2] - 660.).abs() < 1.,
+        "stage after resize: {narrow:?}"
+    );
     key(&mut app, Key::Escape, false);
     assert!(app.find("sidebar-drawer").is_none());
     assert!(app.find("drawer-scrim").is_none());
@@ -278,4 +290,32 @@ fn attached_history_follows_until_scrolled_and_jump_resumes_following() {
         app.frame(1. / 60.);
     }
     assert_eq!(app.scroll_at_bottom(viewport), Some(true));
+}
+
+#[test]
+fn long_error_paths_wrap_inside_a_dismissible_modal_notification() {
+    let profile = TempDir::new().unwrap();
+    let mut app = workspace(&profile);
+    app.set_viewport((660., 540.), 1.);
+    app.state.prefs.reduce_motion = true;
+    app.state.open_settings_modal();
+    app.state.toast = Some((
+        format!("Cannot connect to /tmp/{}/daemon.sock", "long".repeat(95)),
+        true,
+    ));
+    app.invalidate();
+    for _ in 0..30 {
+        app.frame(1. / 60.);
+    }
+    let (banner, _) = app.presented("toast-banner").unwrap();
+    let (message, _) = app.presented("toast-message").unwrap();
+    assert!(message[3] > 30., "message should wrap: {message:?}");
+    assert!(banner[0] >= 0. && banner[0] + banner[2] <= 660.);
+    assert!(message[0] >= banner[0] && message[0] + message[2] <= banner[0] + banner[2] + 1.);
+    let (x, y) = app.find("toast-banner").unwrap();
+    app.pointer_down(x, y);
+    app.pointer_up(x, y);
+    app.frame(1. / 60.);
+    assert!(app.state.toast.is_none());
+    assert_eq!(app.state.active_modal, Some(ActiveModal::SettingsAuth));
 }

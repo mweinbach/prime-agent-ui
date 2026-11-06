@@ -43,43 +43,62 @@ impl PrimeDesktopView {
     pub(super) fn sidebar(&self, cx: &mut Cx<Self>) -> El {
         let p = Palette::for_mode(self.prefs.theme);
         let scope = self.sidebar_project.as_deref();
-        let title = if scope.is_some() {
-            button("sidebar-all-projects", "‹  All projects", p).on_press(Self::show_all_projects)
-        } else {
-            row()
-                .center_y()
-                .gap(6.0)
-                .child(Icon::Prime.render(18.0, p.accent))
-                .child(label("Prime Agent", 13.0, 600.0, p.text_secondary))
-        };
         let top = row()
             .h(48.0)
             .center_y()
             .justify_between()
-            .pl(cx.titlebar_inset().max(12.0))
+            .pl(cx.titlebar_inset().max(16.0))
             .pr(12.0)
             .window_drag()
-            .child(title)
+            .child(
+                row()
+                    .center_y()
+                    .gap(7.0)
+                    .child(Icon::Prime.render(19.0, p.accent))
+                    .child(label("Prime Agent", 14.0, 600.0, p.text_primary)),
+            )
             .child(
                 icon_button("sidebar-collapse-btn", "Hide sidebar", Icon::Sidebar, p)
                     .on_press(Self::toggle_sidebar),
             );
-        let mut toolbar = row().h(38.0).center_y().px(12.0).gap(2.0);
+        let shortcut = if cfg!(target_os = "macos") {
+            "⌘N"
+        } else {
+            "Ctrl+N"
+        };
+        let compose = control("sidebar-compose", "New chat", p)
+            .h(36.0)
+            .w_full()
+            .radius(9.0)
+            .px(11.0)
+            .center_y()
+            .gap(9.0)
+            .fill(p.accent_soft)
+            .press(p.bg_selected)
+            .child(Icon::Compose.render(15.0, p.accent))
+            .child(label("New chat", 13.5, 600.0, p.text_primary).grow(1.0))
+            .child(label(shortcut, 10.5, 500.0, p.text_secondary))
+            .on_press(Self::start_fresh_session);
+        let mut toolbar = row().h(35.0).center_y().pl(15.0).pr(12.0).gap(5.0);
         if scope.is_some() {
-            toolbar = toolbar.child(Icon::FolderOpen.render(16.0, p.text_secondary));
+            toolbar = toolbar.child(
+                icon_button("sidebar-all-projects", "All projects", Icon::ChevronLeft, p)
+                    .size(22.0, 24.0)
+                    .on_press(Self::show_all_projects),
+            );
         }
-        toolbar = toolbar.child(
-            label(
-                scope.map_or_else(|| "Projects".into(), folder_label),
-                16.0,
-                600.0,
-                p.text_primary,
-            )
-            .grow(1.0)
-            .min_w(0.0)
-            .truncate(),
-        );
         toolbar = toolbar
+            .child(
+                label(
+                    scope.map_or_else(|| "Projects".into(), folder_label),
+                    12.0,
+                    600.0,
+                    p.text_secondary,
+                )
+                .grow(1.0)
+                .min_w(0.0)
+                .truncate(),
+            )
             .child(if let Some(cwd) = scope {
                 rows::project_pin(
                     cwd,
@@ -91,18 +110,9 @@ impl PrimeDesktopView {
                 )
             } else {
                 icon_button("add-project", "Add project", Icon::FolderPlus, p)
+                    .size(23.0, 24.0)
                     .on_press(Self::prompt_choose_project_dir)
-            })
-            .child(
-                icon_button(
-                    "sidebar-compose",
-                    "New chat in this project",
-                    Icon::Compose,
-                    p,
-                )
-                .on_press(Self::start_fresh_session),
-            );
-
+            });
         let mut search = row()
             .h(30.0)
             .px(7.0)
@@ -146,8 +156,8 @@ impl PrimeDesktopView {
             .min_h(0.0)
             .fill(p.bg_sidebar)
             .child(top)
+            .child(col().px(12.0).gap(7.0).pb(7.0).child(compose).child(search))
             .child(toolbar)
-            .child(col().px(12.0).pb(8.0).child(search))
             .child(outline::render(self, p));
         if let Some(cursor) = &self.saved_next_cursor {
             let cursor = cursor.clone();
@@ -168,43 +178,37 @@ impl PrimeDesktopView {
             ThemeMode::Dark => (Icon::Sun, "Use light theme"),
             ThemeMode::Light => (Icon::Moon, "Use dark theme"),
         };
-        let footer =
-            row()
-                .h(44.0)
-                .px(10.0)
-                .center_y()
-                .gap(2.0)
-                .child(
-                    control("sidebar-settings", "Connection settings", p)
-                        .h(28.0)
-                        .grow(1.0)
-                        .min_w(0.0)
-                        .child(
-                            row()
-                                .grow(1.0)
-                                .center_y()
-                                .gap(7.0)
-                                .px(5.0)
-                                .child(el().size(6.0, 6.0).radius(3.0).fill(
-                                    if self.daemon_connected {
-                                        p.success
-                                    } else {
-                                        p.text_muted
-                                    },
-                                ))
-                                .child(label(status, 11.5, 400.0, p.text_secondary).truncate()),
-                        )
-                        .on_press(Self::open_settings_modal),
-                )
-                .child(
-                    icon_button("sidebar-refresh-btn", "Refresh", Icon::Refresh, p)
-                        .on_press(Self::refresh_all),
-                )
-                .child(icon_button("toggle-theme-btn", hint, icon, p).on_press(Self::toggle_theme))
-                .child(
-                    icon_button("open-settings-auth-btn", "Settings", Icon::Sliders, p)
-                        .on_press(Self::open_settings_modal),
-                );
+        let footer = row()
+            .h(44.0)
+            .px(10.0)
+            .center_y()
+            .gap(3.0)
+            .child(
+                control("open-settings-auth-btn", "Connection settings", p)
+                    .h(28.0)
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .px(5.0)
+                    .center_y()
+                    .gap(7.0)
+                    .child(Icon::Sliders.render(14.0, p.text_secondary))
+                    .child(label(status, 11.5, 500.0, p.text_secondary).truncate())
+                    .child(
+                        el().size(5.0, 5.0)
+                            .radius(3.0)
+                            .fill(if self.daemon_connected {
+                                p.success
+                            } else {
+                                p.text_muted
+                            }),
+                    )
+                    .on_press(Self::open_settings_modal),
+            )
+            .child(
+                icon_button("sidebar-refresh-btn", "Refresh", Icon::Refresh, p)
+                    .on_press(Self::refresh_all),
+            )
+            .child(icon_button("toggle-theme-btn", hint, icon, p).on_press(Self::toggle_theme));
         sidebar
             .child(el().h(1.0).fill(p.border_subtle))
             .child(footer)
