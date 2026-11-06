@@ -172,7 +172,17 @@ impl PrimeDesktopView {
                     ));
                 }
             }
-            Err(error) => self.toast = Some((format!("{error:#}"), true)),
+            Err(error) => {
+                // The picker may have stashed an empty draft while this batch was
+                // running. A failed load must not leave a phantom sidebar chat.
+                if let Some(drafts) = self.drafts.get_mut(&target) {
+                    drafts.retain(|(text, files)| !text.is_empty() || !files.is_empty());
+                    if drafts.is_empty() {
+                        self.drafts.remove(&target);
+                    }
+                }
+                self.toast = Some((format!("{error:#}"), true));
+            }
         }
         if self.reasoning_picker_open {
             self.open_reasoning_picker();
@@ -230,6 +240,25 @@ mod tests {
         view.remove_attachment(id);
         assert!(view.selected_attachment_preview().is_none());
         assert!(view.staged_attachments.is_empty());
+    }
+
+    #[test]
+    fn a_failed_load_in_a_different_project_leaves_no_empty_draft() {
+        let profile = tempfile::tempdir().unwrap();
+        let mut view = PrimeDesktopView::new(
+            LaunchOptions {
+                daemon_socket: Some(profile.path().join("offline.sock")),
+                initial_cwd: Some(profile.path().into()),
+                ..Default::default()
+            },
+            profile.path().into(),
+        );
+        let original = view.draft_key();
+        view.pending_attachments.insert(original.clone());
+        view.new_project_chat("/another");
+        assert!(view.drafts.contains_key(&original));
+        view.finish_attachment_load(original.clone(), Err(anyhow::anyhow!("unsupported")));
+        assert!(!view.drafts.contains_key(&original));
     }
 
     #[test]
