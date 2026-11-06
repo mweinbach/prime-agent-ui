@@ -1,7 +1,4 @@
-//! Native GPUI desktop application and agentic harness studio for Prime Agent.
-// UI layout coordinates and byte sizes convert across bounded f32/usize/u64 boundaries;
-// GPUI render trees are flat builders by design, and Copy theme `Palette` structs are passed
-// by value across pure element functions just like GPUI `Hsla`/`Style` values.
+//! Native Rune desktop application and agentic harness studio for Prime Agent.
 #![allow(
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
@@ -14,58 +11,63 @@
 
 pub mod assets;
 pub mod bridge;
+pub(crate) mod provider_connect;
+mod shortcuts;
 pub mod state;
 pub mod theme;
 pub mod ui;
 
-use gpui::{
-    App, Application, Bounds, TitlebarOptions, WindowBackgroundAppearance, WindowBounds,
-    WindowOptions, point, prelude::*, px, size,
-};
+use rune::{App, AppSpec, Chrome};
 
-use crate::assets::{EmbeddedAssets, register_embedded_fonts};
-use crate::ui::text_input::bind_text_input_keys;
-use crate::ui::workspace::{
-    LaunchOptions, PrimeDesktopView, register_workspace_bindings_and_menus,
-};
+use crate::assets::EMBEDDED_FONTS;
+use crate::theme::{font_mono, font_sans};
+use crate::ui::workspace::{LaunchOptions, PrimeDesktopView};
 
-/// Launch the GPUI desktop window and enter the native platform runloop.
+fn open_workspace(options: LaunchOptions) -> PrimeDesktopView {
+    let agent_dir = pa_types::platform::agent_dir().unwrap_or_else(|| ".prime/agent".into());
+    let mut view = PrimeDesktopView::new(options, agent_dir);
+    if !rune::is_headless() {
+        // These challenges have already been checked against the expected provider host.
+        // Do not expose the challenge URL in a native error message or log.
+        view.provider_browser = Some(|raw| {
+            url::Url::parse(raw).is_ok_and(|url| {
+                url.scheme() == "https"
+                    && url.has_host()
+                    && open::that_detached(url.as_str()).is_ok()
+            })
+        });
+    }
+    view
+}
+
+/// Launch the Rune desktop window or run Rune's headless tools on the same view.
 ///
 /// # Panics
 ///
-/// Panics only if the native window server rejects opening the primary application window.
+/// Panics if the platform cannot initialize the desktop or its I/O runtime.
 pub fn run_desktop_app(options: LaunchOptions) {
-    Application::new()
-        .with_assets(EmbeddedAssets)
-        .run(move |cx: &mut App| {
-            register_embedded_fonts(cx);
-            bind_text_input_keys(cx);
-            register_workspace_bindings_and_menus(cx);
-
-            let bounds = Bounds::centered(None, size(px(1360.0), px(860.0)), cx);
-            let agent_dir =
-                pa_types::platform::agent_dir().unwrap_or_else(|| ".prime/agent".into());
-            cx.open_window(
-                WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
-                    window_min_size: Some(size(px(660.0), px(540.0))),
-                    titlebar: Some(TitlebarOptions {
-                        title: Some("Prime Agent".into()),
-                        appears_transparent: cfg!(target_os = "macos"),
-                        traffic_light_position: cfg!(target_os = "macos")
-                            .then(|| point(px(16.0), px(15.0))),
-                    }),
-                    window_background: WindowBackgroundAppearance::Opaque,
-                    focus: true,
-                    show: true,
-                    ..Default::default()
-                },
-                move |window, cx| {
-                    cx.new(|cx| PrimeDesktopView::new(options, agent_dir, window, cx))
-                },
-            )
-            .expect("open Prime Agent GPUI window");
-
-            cx.activate(true);
-        });
+    let spec = AppSpec {
+        fonts: EMBEDDED_FONTS,
+        families: (font_sans(), font_mono()),
+        min_size: Some((660.0, 540.0)),
+        setup: Some(PrimeDesktopView::set_waker),
+        poll: Some(PrimeDesktopView::poll),
+        on_key: Some(shortcuts::handle_key),
+        ..AppSpec::new(
+            "Prime Agent",
+            (1360.0, 860.0),
+            || open_workspace(LaunchOptions::default()),
+            PrimeDesktopView::view,
+        )
+    };
+    rune::set_app_id("ai.primeintellect.prime-agent.desktop");
+    let app = App::new(spec)
+        .init(move || open_workspace(options))
+        .chrome(Chrome {
+            full_size_content: cfg!(target_os = "macos"),
+            traffic_lights: cfg!(target_os = "macos").then_some((16.0, 15.0)),
+            ..Chrome::default()
+        })
+        .standard_menus();
+    shortcuts::install_menus(app).run();
 }

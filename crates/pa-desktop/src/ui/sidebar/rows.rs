@@ -1,370 +1,309 @@
-use gpui::{
-    AnyElement, Context, Div, ElementId, FontWeight, SharedString, Stateful, div, prelude::*, px,
-};
+//! Project and chat rows. Navigation and destructive controls have separate hit targets.
 
-use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-
-use super::{ROW_HEIGHT, project_tooltip};
+use super::ROW_HEIGHT;
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
-use crate::state::projects::ProjectGroup;
-use crate::state::{ActiveSessionRow, SavedSessionRow};
-use crate::theme::{Palette, font_mono};
-use crate::ui::modals::confirm_action;
+use crate::state::{ActiveSessionRow, SavedSessionRow, projects::ProjectGroup};
+use crate::theme::Palette;
+use crate::ui::panel_controls::{control, icon_button, label};
 use crate::ui::workspace::PrimeDesktopView;
+use rune::{Color, Cursor, El, col, el, row};
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-fn row_button(
-    id: impl Into<ElementId>,
-    tooltip: impl Into<SharedString>,
-    palette: Palette,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .size(px(24.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .rounded_md()
-        .cursor_pointer()
-        .tooltip(project_tooltip(tooltip.into(), palette))
+pub(super) fn project_pin(cwd: &str, pinned: bool, reveal: bool, p: Palette) -> El {
+    let path = cwd.to_owned();
+    let (icon, title) = if pinned {
+        (Icon::PinOff, "Unpin project")
+    } else {
+        (Icon::Pin, "Pin project")
+    };
+    row_action(&format!("project-pin-{path}"), title, icon, reveal, p).on_press(
+        move |s: &mut PrimeDesktopView| {
+            if pinned {
+                let path = path.clone();
+                s.confirm(
+                    format!("Unpin {path}? Its files and chats will stay where they are."),
+                    "Unpin project",
+                    move |s| s.unpin_project(&path),
+                );
+            } else {
+                s.pin_project(&path);
+            }
+        },
+    )
 }
 
-fn project_heading(
+pub(super) fn project(
     group: &ProjectGroup,
     current: bool,
     searching: bool,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> Stateful<Div> {
-    let icon = if group.is_temporary() {
+    focused: Option<&str>,
+    p: Palette,
+) -> El {
+    let key = group.key().to_owned();
+    let mut heading = row()
+        .hover_group()
+        .h(ROW_HEIGHT)
+        .center_y()
+        .gap(2.0)
+        .px(2.0);
+    let has_children = !group.chats.is_empty() || !group.draft_cwds.is_empty();
+    if !searching && has_children {
+        let icon = if group.collapsed {
+            Icon::ChevronRight
+        } else {
+            Icon::ChevronDown
+        };
+        let hint = if group.collapsed {
+            "Expand project"
+        } else {
+            "Collapse project"
+        };
+        let key = key.clone();
+        heading = heading.child(
+            icon_button(format!("project-toggle-{key}"), hint, icon, p)
+                .size(18.0, 24.0)
+                .on_press(move |s: &mut PrimeDesktopView| s.toggle_project(&key)),
+        );
+    } else if !searching {
+        heading = heading.child(el().w(18.0));
+    }
+    let folder_icon = if group.is_temporary() {
         Icon::History
-    } else if group.collapsed {
+    } else if group.collapsed || !has_children {
         Icon::Folder
     } else {
         Icon::FolderOpen
     };
-    let label = div()
-        .id(SharedString::from(format!(
-            "project-heading-{}",
-            group.key()
-        )))
-        .h_full()
-        .min_w_0()
-        .flex_1()
-        .flex()
-        .items_center()
-        .pl(px(8.0))
-        .gap(px(7.0))
-        .child(icon.render(
-            15.0,
-            if current {
-                palette.accent
-            } else {
-                palette.text_muted
-            },
-        ))
+    let mut title = row()
+        .key(format!("project-focus-{key}"))
+        .grow(1.0)
+        .min_w(0.0)
+        .h(26.0)
+        .center_y()
+        .gap(5.0)
+        .radius(5.0)
+        .child(folder_icon.render(14.0, p.text_secondary))
         .child(
-            div()
-                .min_w_0()
-                .truncate()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(palette.text_secondary)
-                .child(group.label.clone()),
+            label(
+                &group.label,
+                13.0,
+                if current { 600.0 } else { 500.0 },
+                p.text_primary,
+            )
+            .grow(1.0)
+            .min_w(0.0)
+            .truncate(),
         );
-    if let Some(cwd) = group.folder() {
-        let cwd = cwd.to_owned();
-        label
-            .cursor_pointer()
-            .debug_selector(|| format!("project-focus-{cwd}"))
-            .tooltip(project_tooltip(
-                format!("Show chats in {cwd}").into(),
-                palette,
+    if let Some(path) = group.folder() {
+        let path = path.to_owned();
+        title = title
+            .role("button")
+            .label(&group.label)
+            .help(&path)
+            .focusable(true)
+            .cursor(Cursor::Pointer)
+            .hover(p.bg_hover)
+            .on_press(move |s: &mut PrimeDesktopView| s.focus_sidebar_project(&path));
+    } else if !searching {
+        title = title
+            .role("button")
+            .label(&group.label)
+            .focusable(true)
+            .cursor(Cursor::Pointer)
+            .on_press(move |s: &mut PrimeDesktopView| s.toggle_project(&key));
+    }
+    heading = heading.child(title);
+    if let Some(path) = group.folder() {
+        let path = path.to_owned();
+        let pin_key = format!("project-pin-{path}");
+        let new_key = format!("project-new-chat-{path}");
+        heading = heading
+            .child(project_pin(
+                &path,
+                group.added,
+                focused == Some(&pin_key),
+                p,
             ))
-            .on_click(cx.listener(move |view, _, _, cx| {
-                cx.stop_propagation();
-                view.focus_sidebar_project(&cwd, cx);
-            }))
-    } else {
-        let toggle = group.key().to_owned();
-        let hint = if group.is_temporary() {
-            "Saved chats from temporary folders"
-        } else {
-            "Chats without a working folder"
-        };
-        label
-            .tooltip(project_tooltip(hint.into(), palette))
-            .when(!searching, |d| {
-                d.cursor_pointer()
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        cx.stop_propagation();
-                        view.toggle_project(&toggle, cx);
-                    }))
-            })
-    }
-}
-
-pub(super) fn project_pin(
-    cwd: &str,
-    pinned: bool,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> Stateful<Div> {
-    let cwd = cwd.to_owned();
-    let (action, hint, icon) = if pinned {
-        ("unpin", "Unpin project", Icon::PinOff)
-    } else {
-        ("pin", "Pin project", Icon::Pin)
-    };
-    row_button(SharedString::from(format!("{action}-{cwd}")), hint, palette)
-        .debug_selector(|| format!("project-pin-{cwd}"))
-        .hover(|s| s.bg(palette.bg_hover))
-        .child(icon.render(13.0, palette.text_secondary))
-        .on_click(cx.listener(move |view, _, window, cx| {
-            cx.stop_propagation();
-            if pinned {
-                let path = cwd.clone();
-                confirm_action(
-                    &format!("Unpin {path}? Its files and chats will stay where they are."),
-                    "Unpin project",
-                    window,
-                    cx,
-                    move |view, cx| view.unpin_project(&path, cx),
-                );
-            } else {
-                view.pin_project(&cwd, cx);
-            }
-        }))
-}
-
-pub(super) fn render_project(
-    group: &ProjectGroup,
-    current: bool,
-    searching: bool,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let key = group.key();
-    let toggle = key.to_owned();
-    let (chevron, hint) = if group.collapsed {
-        (Icon::ChevronRight, "Expand project")
-    } else {
-        (Icon::ChevronDown, "Collapse project")
-    };
-    let folder = group.folder();
-    let pin_slot = div()
-        .relative()
-        .min_w(px(24.0))
-        .h(px(24.0))
-        .flex_none()
-        .flex()
-        .items_center()
-        .justify_center()
-        .when(group.collapsed, |slot| {
-            slot.child(
-                div()
-                    .px(px(3.0))
-                    .font_family(font_mono())
-                    .text_size(px(10.5))
-                    .text_color(palette.text_muted)
-                    .when(folder.is_some(), |n| {
-                        n.group_hover("project-row", gpui::Styled::invisible)
-                    })
-                    .child((group.chats.len() + group.draft_cwds.len()).to_string()),
-            )
-        })
-        .when_some(folder, |slot, cwd| {
-            slot.child(
-                project_pin(cwd, group.added, palette, cx)
-                    .absolute()
-                    .invisible()
-                    .group_hover("project-row", gpui::Styled::visible),
-            )
-        });
-    div()
-        .id(SharedString::from(format!("group-{key}")))
-        .group("project-row")
-        .h(px(ROW_HEIGHT))
-        .w_full()
-        .pr(px(3.0))
-        .flex()
-        .items_center()
-        .rounded_md()
-        .hover(|s| s.bg(palette.bg_hover))
-        .child(project_heading(group, current, searching, palette, cx))
-        .child(pin_slot)
-        .when(!searching, |d| {
-            d.child(
-                row_button(SharedString::from(format!("toggle-{key}")), hint, palette)
-                    .debug_selector(|| format!("project-toggle-{key}"))
-                    .hover(|s| s.bg(palette.bg_hover))
-                    .on_click(cx.listener(move |view, _, _, cx| {
-                        cx.stop_propagation();
-                        view.toggle_project(&toggle, cx);
-                    }))
-                    .child(chevron.render(12.0, palette.text_muted)),
-            )
-        })
-        .when_some(folder, |row, cwd| {
-            let cwd = cwd.to_owned();
-            row.child(
-                row_button(
-                    SharedString::from(format!("new-chat-{cwd}")),
-                    format!("New chat in {}", group.label),
-                    palette,
+            .child(
+                row_action(
+                    &new_key,
+                    &format!("New chat in {}", group.label),
+                    Icon::Compose,
+                    focused == Some(&new_key),
+                    p,
                 )
-                .debug_selector(|| format!("project-new-chat-{cwd}"))
-                .hover(|s| s.bg(palette.bg_hover))
-                .on_click(cx.listener(move |view, _, window, cx| {
-                    cx.stop_propagation();
-                    view.new_project_chat(&cwd, window, cx);
-                }))
-                .child(Icon::Compose.render(14.0, palette.text_secondary)),
-            )
-        })
-        .into_any_element()
-}
-
-pub(super) fn chat_row(
-    id: SharedString,
-    marker: impl IntoElement,
-    title: SharedString,
-    selected: bool,
-    palette: Palette,
-) -> Stateful<Div> {
-    div()
-        .id(id)
-        .group("chat-row")
-        .h(px(ROW_HEIGHT))
-        .w_full()
-        .pl(px(22.0))
-        .pr(px(3.0))
-        .rounded_md()
-        .cursor_pointer()
-        .when(selected, |row| row.bg(palette.bg_selected))
-        .when(!selected, |row| row.hover(|s| s.bg(palette.bg_hover)))
-        .flex()
-        .items_center()
-        .gap(px(7.0))
-        .child(
-            div()
-                .w(px(14.0))
-                .flex_none()
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(marker),
-        )
-        .child(
-            div()
-                .min_w_0()
-                .flex_1()
-                .truncate()
-                .text_size(px(12.5))
-                .when(selected, |d| d.font_weight(FontWeight::MEDIUM))
-                .text_color(if selected {
-                    palette.text_primary
-                } else {
-                    palette.text_secondary
-                })
-                .child(title),
-        )
-}
-
-fn chat_hint(title: &str, state: &str, cwd: &str) -> SharedString {
-    if cwd.is_empty() {
-        format!("{title}\n{state}").into()
-    } else {
-        format!("{title}\n{state} · {cwd}").into()
+                .on_press(move |s: &mut PrimeDesktopView| s.new_project_chat(&path)),
+            );
+    } else if group.collapsed {
+        heading = heading.child(label(
+            group.chats.len().to_string(),
+            11.0,
+            400.0,
+            p.text_muted,
+        ));
     }
+    heading
 }
 
-fn chat_action(
-    id: SharedString,
-    hint: &'static str,
-    icon: Icon,
-    palette: Palette,
-) -> Stateful<Div> {
-    row_button(id, hint, palette)
-        .invisible()
-        .group_hover("chat-row", gpui::Styled::visible)
-        .hover(|s| s.bg(palette.danger_soft))
-        .child(icon.render(12.0, palette.text_muted))
+/// Keep the button and keyboard ring reachable while only its glyph fades.
+fn row_action(key: &str, title: &str, icon: Icon, reveal: bool, p: Palette) -> El {
+    let opacity = if reveal { 1.0 } else { 0.0 };
+    control(key, title, p)
+        .size(22.0, 24.0)
+        .center()
+        .hover(Color::TRANSPARENT)
+        .child(
+            icon.render(14.0, p.text_secondary)
+                .group_opacity(opacity, 1.0),
+        )
 }
 
-pub(super) fn render_active_agent_row(
-    row: &ActiveSessionRow,
-    selected: bool,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let sid = row.active_session_id.clone();
-    let kill_sid = sid.clone();
-    let name = row.name.clone();
-    let (marker, state) = if row.is_streaming {
-        (
-            Icon::Zap.render(12.0, palette.warning).into_any_element(),
-            "Working",
-        )
-    } else {
-        (
-            div()
-                .size(px(7.0))
-                .rounded_full()
-                .bg(palette.success)
-                .into_any_element(),
-            "Live · Idle",
-        )
-    };
-    chat_row(
-        format!("active-row-{sid}").into(),
-        marker,
-        row.name.clone().into(),
-        selected,
-        palette,
-    )
-    .debug_selector(|| "live-session".to_owned())
-    .tooltip(project_tooltip(
-        chat_hint(&row.name, state, &row.cwd),
-        palette,
-    ))
-    .on_click(cx.listener(move |view, _, window, cx| {
-        view.close_sidebar_overlay(window, cx);
-        view.open_session(
-            BridgeRequest::AttachSession {
-                active_session_id: sid.clone(),
-            },
-            cx,
+pub(super) fn chat(key: String, title: &str, icon: El, selected: bool, p: Palette) -> El {
+    let mut item = control(key, title, p)
+        .grow(1.0)
+        .min_w(0.0)
+        .h(ROW_HEIGHT)
+        .pl(32.0)
+        .center_y()
+        .child(
+            row()
+                .grow(1.0)
+                .min_w(0.0)
+                .center_y()
+                .gap(6.0)
+                .child(col().w(14.0).center().child(icon))
+                .child(
+                    label(
+                        title,
+                        12.0,
+                        if selected { 500.0 } else { 400.0 },
+                        if selected {
+                            p.text_primary
+                        } else {
+                            p.text_secondary
+                        },
+                    )
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .truncate(),
+                ),
         );
-        cx.notify();
-    }))
-    .child(
-        chat_action(
-            format!("kill-active-{kill_sid}").into(),
-            "Stop session",
-            Icon::Stop,
-            palette,
-        )
-        .on_click(cx.listener(move |_, _, window, cx| {
-            cx.stop_propagation();
-            let sid = kill_sid.clone();
-            confirm_action(
-                &format!("Stop “{name}”? Its worker and any running turn will stop."),
-                "Stop session",
-                window,
-                cx,
-                move |view, _| {
-                    view.bridge.send(BridgeRequest::KillSession {
-                        active_session_id: sid,
+    if selected {
+        item = item.fill(p.text_primary.alpha(0.07));
+    }
+    item
+}
+
+pub(super) fn live_chat(
+    agent: &ActiveSessionRow,
+    selected: bool,
+    focused: Option<&str>,
+    p: Palette,
+) -> El {
+    let sid = agent.active_session_id.clone();
+    let id = sid.clone();
+    let name = agent.name.clone();
+    let stop_key = format!("kill-active-{id}");
+    let marker = if agent.is_streaming {
+        Icon::Zap.render(12.0, p.warning)
+    } else {
+        el().size(7.0, 7.0).radius(4.0).fill(p.success)
+    };
+    let status = if agent.is_streaming {
+        "Working"
+    } else {
+        "Live · Idle"
+    };
+    row()
+        .hover_group()
+        .h(ROW_HEIGHT)
+        .center_y()
+        .child(
+            chat(format!("live-session-{sid}"), &name, marker, selected, p)
+                .help(format!("{}\n{status} · {}", name, agent.cwd))
+                .on_press(move |s: &mut PrimeDesktopView| {
+                    s.close_sidebar_overlay();
+                    s.open_session(BridgeRequest::AttachSession {
+                        active_session_id: sid.clone(),
                     });
+                }),
+        )
+        .child(
+            row_action(
+                &stop_key,
+                "Stop session",
+                Icon::Stop,
+                focused == Some(&stop_key),
+                p,
+            )
+            .on_press(move |s: &mut PrimeDesktopView| {
+                let sid = id.clone();
+                s.confirm(
+                    format!("Stop “{name}”? Its worker and any running turn will stop."),
+                    "Stop session",
+                    move |s| {
+                        s.bridge.send(BridgeRequest::KillSession {
+                            active_session_id: sid,
+                        });
+                    },
+                );
+            }),
+        )
+}
+
+pub(super) fn saved_chat(
+    agent: &SavedSessionRow,
+    selected: bool,
+    focused: Option<&str>,
+    p: Palette,
+) -> El {
+    let path = agent.path.clone();
+    let cwd = (!agent.cwd.is_empty()).then(|| agent.cwd.clone());
+    let del = path.clone();
+    let delete_key = format!("del-saved-{del}");
+    let title = agent.name.clone();
+    let mut item = row().hover_group().h(ROW_HEIGHT).center_y().child(
+        chat(
+            format!("saved-chat-{path}"),
+            &title,
+            Icon::History.render(12.0, p.text_muted),
+            selected,
+            p,
+        )
+        .help(format!("{}\nSaved chat · {}", title, agent.cwd))
+        .on_press(move |s: &mut PrimeDesktopView| {
+            s.close_sidebar_overlay();
+            s.open_session(BridgeRequest::OpenSavedSession {
+                session_path: path.clone(),
+                cwd: cwd.clone(),
+            });
+        }),
+    );
+    if let Some(age) = modified_age(&agent.modified, OffsetDateTime::now_utc()) {
+        item = item.child(label(age, 10.0, 400.0, p.text_muted));
+    }
+    item.child(
+        row_action(
+            &delete_key,
+            "Delete chat",
+            Icon::Trash,
+            focused == Some(&delete_key),
+            p,
+        )
+        .on_press(move |s: &mut PrimeDesktopView| {
+            let del = del.clone();
+            s.confirm(
+                format!("Permanently delete “{title}” from saved chats?"),
+                "Delete chat",
+                move |s| {
+                    s.bridge
+                        .send(BridgeRequest::DeleteSavedSession { session_path: del });
                 },
             );
-        })),
+        }),
     )
-    .into_any_element()
 }
-
 fn modified_age(modified: &str, now: OffsetDateTime) -> Option<String> {
     let date = OffsetDateTime::parse(modified, &Rfc3339).ok()?;
     let age = now - date;
@@ -381,90 +320,6 @@ fn modified_age(modified: &str, now: OffsetDateTime) -> Option<String> {
     } else {
         format!("{}y", age.whole_days() / 365)
     })
-}
-
-pub(super) fn render_saved_row(
-    row: &SavedSessionRow,
-    selected: bool,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let open_path = row.path.clone();
-    let open_cwd = (!row.cwd.is_empty()).then(|| row.cwd.clone());
-    let del_path = open_path.clone();
-    let name = row.name.clone();
-    chat_row(
-        format!("saved-row-{open_path}").into(),
-        Icon::History.render(12.0, palette.text_muted),
-        row.name.clone().into(),
-        selected,
-        palette,
-    )
-    .debug_selector(|| "saved-chat".to_owned())
-    .tooltip(project_tooltip(
-        chat_hint(&row.name, "Saved chat", &row.cwd),
-        palette,
-    ))
-    .on_click(cx.listener(move |view, _, window, cx| {
-        view.close_sidebar_overlay(window, cx);
-        view.open_session(
-            BridgeRequest::OpenSavedSession {
-                session_path: open_path.clone(),
-                cwd: open_cwd.clone(),
-            },
-            cx,
-        );
-        cx.notify();
-    }))
-    .child(
-        div()
-            .debug_selector(|| format!("sidebar-saved-{}", row.path))
-            .relative()
-            .min_w(px(24.0))
-            .h(px(24.0))
-            .flex_none()
-            .flex()
-            .items_center()
-            .justify_center()
-            .when_some(
-                modified_age(&row.modified, OffsetDateTime::now_utc()),
-                |slot, age| {
-                    slot.child(
-                        div()
-                            .px(px(3.0))
-                            .font_family(font_mono())
-                            .text_size(px(10.5))
-                            .text_color(palette.text_muted)
-                            .group_hover("chat-row", gpui::Styled::invisible)
-                            .child(age),
-                    )
-                },
-            )
-            .child(
-                chat_action(
-                    format!("del-saved-{}", row.id).into(),
-                    "Delete chat",
-                    Icon::Trash,
-                    palette,
-                )
-                .on_click(cx.listener(move |_, _, window, cx| {
-                    cx.stop_propagation();
-                    let path = del_path.clone();
-                    confirm_action(
-                        &format!("Permanently delete “{name}” from saved chats?"),
-                        "Delete chat",
-                        window,
-                        cx,
-                        move |view, _| {
-                            view.bridge
-                                .send(BridgeRequest::DeleteSavedSession { session_path: path });
-                        },
-                    );
-                }))
-                .absolute(),
-            ),
-    )
-    .into_any_element()
 }
 
 #[cfg(test)]

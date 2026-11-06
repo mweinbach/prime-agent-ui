@@ -1,6 +1,8 @@
 # Prime Agent Desktop
 
-An unofficial desktop client for [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), built with [GPUI](https://www.gpui.rs/). It uses the Prime Agent daemon and reads the same saved chats and provider credentials as the CLI. Credentials and conversations are not distributed in this repository.
+An unofficial desktop client for [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), built with [Rune](https://github.com/anomalyco/rune). It uses the Prime Agent daemon and reads the same saved chats and provider credentials as the CLI. Credentials and conversations are not distributed in this repository.
+
+To connect an inference provider from the app, open **Settings → Connect provider…** or type `/login` in the composer. See the [desktop guide](crates/pa-desktop/README.md#use-your-prime-agent-cli-data) for sign-in methods and shared CLI credentials.
 
 ## Download or build
 
@@ -31,8 +33,8 @@ python3 scripts/build_desktop.py
 
 On Windows, use `py -3 scripts/build_desktop.py` instead. For an existing checkout, run `git submodule update --init --recursive` first. The script builds both binaries from the checked-in lockfiles, packages them, and writes the archive to `dist/`. `--arch arm64` or `--arch x86_64` checks the host architecture; it does not cross-compile. See the [build workflow](.github/workflows/desktop-build.yml) for the runner setup.
 
-- **Windows:** Install Visual Studio Build Tools with the C++ workload, the MSVC tools for your architecture, and the Windows SDK (including `fxc.exe`). Use an MSVC Rust toolchain.
-- **macOS:** Install Xcode and the Metal toolchain. `make desktop-app` is still available if you want an unpacked `.app` in `dist/`.
+- **Windows:** Install Visual Studio Build Tools with the C++ workload, the MSVC tools for your architecture, and the Windows SDK. Use an MSVC Rust toolchain.
+- **macOS:** Install Xcode. `make desktop-app` is still available if you want an unpacked `.app` in `dist/`.
 - **Linux:** On Ubuntu 24.04 install the [native build dependencies listed in CI](.github/workflows/desktop-build.yml). Other distributions may use different names for the same libraries.
 
 Maintainers can run the [Desktop build workflow](https://github.com/mweinbach/prime-agent-ui/actions/workflows/desktop-build.yml) to build all four archives without creating a release. Pushing a `release/desktop-v*` candidate branch also builds and verifies the four archives. A `desktop-v*` tag builds the same matrix and publishes the archives to GitHub Releases if every build passes.
@@ -43,7 +45,7 @@ See the [desktop guide](crates/pa-desktop/README.md) for projects, subagents, CL
 
 | Repository | Owns |
 | --- | --- |
-| [mweinbach/prime-agent-ui](https://github.com/mweinbach/prime-agent-ui) | The GPUI app in `crates/pa-desktop`, integration tests, and desktop packaging |
+| [mweinbach/prime-agent-ui](https://github.com/mweinbach/prime-agent-ui) | The Rune app in `crates/pa-desktop`, integration tests, and desktop packaging |
 | [mweinbach/prime-agent](https://github.com/mweinbach/prime-agent) | The `harness/` submodule: Rust daemon, CLI, providers, Python runtime, and skills |
 | [PrimeIntellect-ai/prime-agent](https://github.com/PrimeIntellect-ai/prime-agent) | Upstream for the harness fork |
 

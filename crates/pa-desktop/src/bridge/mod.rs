@@ -1,7 +1,7 @@
 //! Non-blocking async daemon bridge (`pa-desktop` <-> `pa-daemon`).
 //!
 //! Runs all socket and process work on a dedicated 2-thread Tokio runtime so
-//! the GPUI render thread never blocks on network, IPC, or process spawns.
+//! the render thread never blocks on network, IPC, or process spawns.
 
 mod catalog;
 mod data;
@@ -34,7 +34,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::state::{
     ActiveSessionRow, McpRow, RlmChildRow, SavedSessionRow, ScheduleRow, ShellProcessRow,
-    StagedImage,
+    StagedAttachment,
 };
 use crate::theme::DaemonTarget;
 
@@ -42,7 +42,7 @@ use crate::theme::DaemonTarget;
 #[cfg(unix)]
 pub const DESKTOP_DAEMON_SOCKET_NAME: &str = "desktop-daemon.sock";
 
-/// Commands dispatched from the GPUI foreground view to the background I/O worker.
+/// Commands dispatched from the desktop view to the background I/O worker.
 #[derive(Debug, Clone)]
 pub enum BridgeRequest {
     Connect {
@@ -59,7 +59,7 @@ pub enum BridgeRequest {
         cwd: String,
         name: Option<String>,
         initial_prompt: Option<String>,
-        images: Vec<StagedImage>,
+        attachments: Vec<StagedAttachment>,
     },
     OpenSavedSession {
         session_path: String,
@@ -85,7 +85,7 @@ pub enum BridgeRequest {
     SendPrompt {
         active_session_id: String,
         message: String,
-        images: Vec<StagedImage>,
+        attachments: Vec<StagedAttachment>,
     },
     SteerSession {
         active_session_id: String,
@@ -105,12 +105,17 @@ pub enum BridgeRequest {
         active_session_id: String,
     },
     SetModel {
+        request_id: uuid::Uuid,
         active_session_id: String,
         provider: String,
         model_id: String,
+        offer_connection: bool,
     },
     SetThinkingLevel {
+        request_id: uuid::Uuid,
         active_session_id: String,
+        provider: String,
+        model_id: String,
         level: String,
     },
     SetAutoCompaction {
@@ -140,6 +145,10 @@ pub enum BridgeRequest {
     },
     AbortBash {
         active_session_id: String,
+    },
+    RefreshConnectedCatalog {
+        active_session_id: String,
+        request: uuid::Uuid,
     },
     RefreshInspector {
         active_session_id: String,
@@ -213,7 +222,7 @@ pub enum BridgeRequest {
     },
 }
 
-/// Asynchronous events pushed from the background worker to the GPUI foreground task.
+/// Asynchronous events pushed from the background worker to the desktop view.
 #[derive(Debug, Clone)]
 pub enum BridgeEvent {
     ConnectionStatus {
@@ -240,7 +249,7 @@ pub enum BridgeEvent {
     PromptRejected {
         draft: crate::state::DraftKey,
         message: String,
-        images: Vec<StagedImage>,
+        attachments: Vec<StagedAttachment>,
         reason: String,
     },
     SessionAttached {
@@ -281,7 +290,25 @@ pub enum BridgeEvent {
         requested: String,
         actual: String,
     },
+    ModelCredentialsRequired {
+        active_session_id: String,
+        request_id: uuid::Uuid,
+        provider: String,
+        model_id: String,
+    },
+    ModelSettingFinished {
+        active_session_id: String,
+        request_id: uuid::Uuid,
+        state: std::result::Result<Value, String>,
+    },
+    ConnectedCatalog {
+        revision: u64,
+        active_session_id: String,
+        request: uuid::Uuid,
+        data: Option<Value>,
+    },
     ModelCatalogLoaded {
+        revision: u64,
         active_session_id: String,
         data: Value,
     },
@@ -315,7 +342,7 @@ pub enum BridgeEvent {
     },
 }
 
-/// Non-blocking handle held by the GPUI window entity.
+/// Non-blocking handle held by the desktop window.
 pub struct BridgeHandle {
     tx: mpsc::UnboundedSender<BridgeRequest>,
     runtime: Arc<tokio::runtime::Runtime>,
@@ -347,6 +374,14 @@ impl BridgeHandle {
             },
             evt_rx,
         ))
+    }
+
+    pub(crate) fn spawn_io(&self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+        self.runtime.spawn(work);
+    }
+
+    pub(crate) fn spawn_blocking(&self, work: impl FnOnce() + Send + 'static) {
+        self.runtime.spawn_blocking(work);
     }
 
     /// Enqueue a request without awaiting any network or socket operation.
@@ -530,6 +565,17 @@ struct RawClient {
     inbound_frames: Arc<Mutex<Option<mpsc::UnboundedReceiver<Value>>>>,
 }
 
+#[derive(Debug)]
+struct WriterClosed;
+
+impl std::fmt::Display for WriterClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Daemon disconnected before the request could be sent.")
+    }
+}
+
+impl std::error::Error for WriterClosed {}
+
 impl RawClient {
     async fn connect(socket_path: &Path) -> Result<Self> {
         let stream = tokio::time::timeout(
@@ -646,7 +692,7 @@ impl RawClient {
         self.pending.insert(id.clone(), tx);
         if self.writer.send(encoded).is_err() {
             self.pending.fail_all("daemon writer closed");
-            return Err(anyhow!("daemon socket disconnected"));
+            return Err(WriterClosed.into());
         }
         tokio::time::timeout(timeout, rx)
             .await
@@ -662,6 +708,7 @@ async fn run_worker_loop(
 ) {
     let mut active_client: Option<RawClient> = None;
     let mut tasks = tokio::task::JoinSet::new();
+    let mut catalog_revision = 0_u64;
 
     loop {
         let req = tokio::select! {
@@ -744,29 +791,72 @@ async fn run_worker_loop(
                 }
             }
             other => {
+                if matches!(
+                    other,
+                    BridgeRequest::RefreshInspector { .. }
+                        | BridgeRequest::RefreshConnectedCatalog { .. }
+                ) {
+                    catalog_revision += 1;
+                }
                 let transition = matches!(
                     other,
                     BridgeRequest::AttachSession { .. }
                         | BridgeRequest::CreateSession { .. }
                         | BridgeRequest::OpenSavedSession { .. }
                 );
+                let model_setting = match &other {
+                    BridgeRequest::SetModel {
+                        active_session_id,
+                        request_id,
+                        ..
+                    }
+                    | BridgeRequest::SetThinkingLevel {
+                        active_session_id,
+                        request_id,
+                        ..
+                    } => Some((active_session_id.clone(), *request_id)),
+                    _ => None,
+                };
                 let client = active_client.clone();
                 let tx = evt_tx.clone();
                 tasks.spawn(async move {
-                    let outcome = match client {
-                        Some(client) => dispatch_request(&client, other, &tx).await,
-                        None => Err(anyhow!("Not connected. Refresh to reconnect.")),
+                    let outcome = if let Some(client) = client {
+                        dispatch_request(&client, other, &tx, catalog_revision).await
+                    } else if let BridgeRequest::RefreshConnectedCatalog {
+                        active_session_id,
+                        request,
+                    } = other
+                    {
+                        let _ = tx.unbounded_send(BridgeEvent::ConnectedCatalog {
+                            revision: catalog_revision,
+                            active_session_id,
+                            request,
+                            data: None,
+                        });
+                        Ok(())
+                    } else {
+                        let reason = "Not connected. Refresh to reconnect.";
+                        restore_undispatched_prompt(other, &tx, reason);
+                        Err(anyhow!(reason))
                     };
                     if let Err(error) = outcome {
                         let message = format!("{error:#}");
-                        let _ = tx.unbounded_send(if transition {
-                            BridgeEvent::SessionTransitionFailed { message }
-                        } else {
-                            BridgeEvent::Toast {
-                                message,
-                                is_error: true,
-                            }
-                        });
+                        let _ = tx.unbounded_send(
+                            if let Some((active_session_id, request_id)) = model_setting {
+                                BridgeEvent::ModelSettingFinished {
+                                    active_session_id,
+                                    request_id,
+                                    state: Err(message),
+                                }
+                            } else if transition {
+                                BridgeEvent::SessionTransitionFailed { message }
+                            } else {
+                                BridgeEvent::Toast {
+                                    message,
+                                    is_error: true,
+                                }
+                            },
+                        );
                     }
                 });
             }
@@ -786,29 +876,50 @@ fn check_daemon_ok(resp: DaemonResponse) -> Result<Value> {
     }
 }
 
-fn wire_images(images: &[StagedImage]) -> Option<Value> {
-    if images.is_empty() {
-        return None;
-    }
-    Some(Value::Array(
-        images
-            .iter()
-            .map(|img| {
-                json!({
-                    "type": "image",
-                    "mimeType": img.mime_type,
-                    "data": img.base64_data,
-                })
-            })
-            .collect(),
-    ))
+fn restore_undispatched_prompt(
+    request: BridgeRequest,
+    events: &futures_mpsc::UnboundedSender<BridgeEvent>,
+    reason: &str,
+) {
+    let (draft, message, attachments) = match request {
+        BridgeRequest::CreateSession {
+            cwd,
+            initial_prompt: Some(message),
+            attachments,
+            ..
+        } => (crate::state::DraftKey::Project(cwd), message, attachments),
+        BridgeRequest::SendPrompt {
+            active_session_id,
+            message,
+            attachments,
+        } => (
+            crate::state::DraftKey::Session(active_session_id),
+            message,
+            attachments,
+        ),
+        _ => return,
+    };
+    let _ = events.unbounded_send(BridgeEvent::PromptRejected {
+        draft,
+        message,
+        attachments,
+        reason: reason.to_owned(),
+    });
+}
+
+fn wire_images(attachments: &[StagedAttachment]) -> Option<Value> {
+    let images: Vec<_> = attachments
+        .iter()
+        .filter_map(StagedAttachment::wire_image)
+        .collect();
+    (!images.is_empty()).then_some(Value::Array(images))
 }
 
 async fn submit_prompt(
     client: &RawClient,
     session: String,
     message: String,
-    images: Vec<StagedImage>,
+    attachments: Vec<StagedAttachment>,
     events: &futures_mpsc::UnboundedSender<BridgeEvent>,
 ) -> Result<()> {
     let response = client
@@ -816,10 +927,10 @@ async fn submit_prompt(
             DaemonCommand::Prompt {
                 id: None,
                 active_session_id: session.clone(),
-                message: message.clone(),
+                message: crate::state::attachments::wire_text(&message, &attachments).into_owned(),
                 input: PromptInput {
                     content: None,
-                    images: wire_images(&images),
+                    images: wire_images(&attachments),
                     streaming_behavior: None,
                     queue_if_busy: Some(true),
                     expand_prompt_templates: Some(true),
@@ -835,7 +946,25 @@ async fn submit_prompt(
             },
             Duration::from_secs(20),
         )
-        .await?;
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) if error.is::<WriterClosed>() => {
+            let _ = events.unbounded_send(BridgeEvent::PromptRejected {
+                draft: crate::state::DraftKey::Session(session),
+                message,
+                attachments,
+                reason: error.to_string(),
+            });
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(
+                error.context("Prompt delivery is uncertain. Check the session before resending.")
+            );
+        }
+    };
+
     if response.success {
         return Ok(());
     }
@@ -853,7 +982,7 @@ async fn submit_prompt(
     let _ = events.unbounded_send(BridgeEvent::PromptRejected {
         draft: crate::state::DraftKey::Session(session),
         message,
-        images,
+        attachments,
         reason,
     });
     Ok(())
@@ -864,6 +993,7 @@ async fn dispatch_request(
     client: &RawClient,
     req: BridgeRequest,
     evt_tx: &futures_mpsc::UnboundedSender<BridgeEvent>,
+    catalog_revision: u64,
 ) -> Result<()> {
     let std_timeout = Duration::from_secs(20);
     match req {
@@ -878,7 +1008,7 @@ async fn dispatch_request(
             cwd,
             name,
             initial_prompt,
-            images,
+            attachments,
         } => {
             let mut extra = Map::new();
             extra.insert("cwd".to_string(), json!(cwd));
@@ -919,7 +1049,7 @@ async fn dispatch_request(
                         let _ = evt_tx.unbounded_send(BridgeEvent::PromptRejected {
                             draft: crate::state::DraftKey::Project(cwd),
                             message,
-                            images,
+                            attachments,
                             reason: format!("{error:#}"),
                         });
                     }
@@ -927,9 +1057,9 @@ async fn dispatch_request(
                 }
             };
             if let Some(prompt) =
-                initial_prompt.filter(|p| !p.trim().is_empty() || !images.is_empty())
+                initial_prompt.filter(|p| !p.trim().is_empty() || !attachments.is_empty())
             {
-                submit_prompt(client, sid, prompt, images, evt_tx).await?;
+                submit_prompt(client, sid, prompt, attachments, evt_tx).await?;
             }
             refresh_sessions(client, None, evt_tx).await;
         }
@@ -1050,9 +1180,9 @@ async fn dispatch_request(
         BridgeRequest::SendPrompt {
             active_session_id,
             message,
-            images,
+            attachments,
         } => {
-            submit_prompt(client, active_session_id, message, images, evt_tx).await?;
+            submit_prompt(client, active_session_id, message, attachments, evt_tx).await?;
         }
         BridgeRequest::SteerSession {
             active_session_id,
@@ -1161,48 +1291,83 @@ async fn dispatch_request(
             )?;
         }
         BridgeRequest::SetModel {
+            request_id,
             active_session_id,
             provider,
             model_id,
+            offer_connection,
         } => {
-            check_daemon_ok(
-                client
-                    .request(
-                        DaemonCommand::SetModel {
-                            id: None,
-                            active_session_id: active_session_id.clone(),
-                            provider: provider.clone(),
-                            model_id: model_id.clone(),
-                            rest: Map::new(),
-                        },
-                        std_timeout,
-                    )
-                    .await?,
-            )?;
-            hydrate_session_state(client, &active_session_id, evt_tx).await;
-            let _ = evt_tx.unbounded_send(BridgeEvent::Toast {
-                message: format!("Switched model to {provider}/{model_id}"),
-                is_error: false,
-            });
+            let response = client
+                .request(
+                    DaemonCommand::SetModel {
+                        id: None,
+                        active_session_id: active_session_id.clone(),
+                        provider: provider.clone(),
+                        model_id: model_id.clone(),
+                        rest: Map::new(),
+                    },
+                    std_timeout,
+                )
+                .await?;
+            // An expired or removed credential can race the catalog we showed.
+            // Only offer login for the provider the user actually selected.
+            if !response.success
+                && matches!(
+                    &response.error_info,
+                    Some(pa_types::daemon::DaemonErrorInfo::ModelProviderUnauthenticated { provider: rejected })
+                        if *rejected == provider
+                )
+            {
+                anyhow::ensure!(
+                    offer_connection,
+                    "The daemon still needs credentials for {provider}. Check this provider in Settings."
+                );
+                let _ = evt_tx.unbounded_send(BridgeEvent::ModelCredentialsRequired {
+                    active_session_id,
+                    request_id,
+                    provider,
+                    model_id,
+                });
+                return Ok(());
+            }
+            check_daemon_ok(response)?;
+            report_model_setting(client, active_session_id, request_id, evt_tx).await?;
         }
         BridgeRequest::SetThinkingLevel {
+            request_id,
             active_session_id,
+            provider,
+            model_id,
             level,
         } => {
+            // The shared CLI can switch models without a desktop interaction. Check
+            // the daemon's model before applying a level advertised by the open menu.
+            let current = read_session_state(client, &active_session_id).await?;
+            if crate::state::models::session_model(&current)
+                != (Some(provider.as_str()), Some(model_id.as_str()))
+            {
+                let _ = evt_tx.unbounded_send(BridgeEvent::SessionEvent {
+                    active_session_id,
+                    event: json!({"type":"desktop_state_sync", "state":current}),
+                });
+                anyhow::bail!(
+                    "The session model changed. Choose a reasoning effort for its current model."
+                );
+            }
             check_daemon_ok(
                 client
                     .request(
                         DaemonCommand::SetThinkingLevel {
                             id: None,
                             active_session_id: active_session_id.clone(),
-                            level: level.clone(),
+                            level,
                             rest: Map::new(),
                         },
                         std_timeout,
                     )
                     .await?,
             )?;
-            hydrate_session_state(client, &active_session_id, evt_tx).await;
+            report_model_setting(client, active_session_id, request_id, evt_tx).await?;
         }
         BridgeRequest::SetAutoCompaction {
             active_session_id,
@@ -1337,25 +1502,25 @@ async fn dispatch_request(
                     .await?,
             )?;
         }
+        BridgeRequest::RefreshConnectedCatalog {
+            active_session_id,
+            request,
+        } => {
+            let data = fetch_model_catalog(client, &active_session_id).await;
+            let _ = evt_tx.unbounded_send(BridgeEvent::ConnectedCatalog {
+                revision: catalog_revision,
+                active_session_id,
+                request,
+                data,
+            });
+        }
         BridgeRequest::RefreshInspector { active_session_id } => {
-            if let Ok(resp) = client
-                .request(
-                    DaemonCommand::GetModelCatalog {
-                        id: None,
-                        active_session_id: active_session_id.clone(),
-                        rest: Map::new(),
-                    },
-                    std_timeout,
-                )
-                .await
-                && resp.success
-                && let Some(data) = resp.data
-            {
-                let _ = evt_tx.unbounded_send(BridgeEvent::ModelCatalogLoaded {
-                    active_session_id: active_session_id.clone(),
-                    data,
-                });
-            }
+            let data = fetch_model_catalog(client, &active_session_id).await;
+            let _ = evt_tx.unbounded_send(BridgeEvent::ModelCatalogLoaded {
+                revision: catalog_revision,
+                active_session_id: active_session_id.clone(),
+                data: data.unwrap_or(Value::Null),
+            });
             load_inspector_snapshot(client, &active_session_id, evt_tx).await;
         }
         BridgeRequest::TailShell {
@@ -1768,32 +1933,54 @@ async fn attach_and_hydrate(
     Ok(())
 }
 
-async fn hydrate_session_state(
+async fn fetch_model_catalog(client: &RawClient, active_session_id: &str) -> Option<Value> {
+    let response = client
+        .request(
+            DaemonCommand::GetModelCatalog {
+                id: None,
+                active_session_id: active_session_id.to_owned(),
+                rest: Map::new(),
+            },
+            Duration::from_secs(20),
+        )
+        .await
+        .ok()?;
+    response.success.then_some(response.data).flatten()
+}
+
+/// The daemon can clamp reasoning when either setting changes. Read back the
+/// effective model and effort together before allowing another picker write.
+async fn report_model_setting(
     client: &RawClient,
-    active_session_id: &str,
+    active_session_id: String,
+    request_id: uuid::Uuid,
     evt_tx: &futures_mpsc::UnboundedSender<BridgeEvent>,
-) {
-    if let Ok(resp) = client
+) -> Result<()> {
+    let state = read_session_state(client, &active_session_id)
+        .await
+        .context("Selection applied, but the updated session could not be read")?;
+    let _ = evt_tx.unbounded_send(BridgeEvent::ModelSettingFinished {
+        active_session_id,
+        request_id,
+        state: Ok(state),
+    });
+    Ok(())
+}
+
+async fn read_session_state(client: &RawClient, active_session_id: &str) -> Result<Value> {
+    let response = client
         .request(
             DaemonCommand::GetState {
                 id: None,
-                active_session_id: active_session_id.to_string(),
+                active_session_id: active_session_id.to_owned(),
                 rest: Map::new(),
             },
             Duration::from_secs(10),
         )
-        .await
-        && resp.success
-        && let Some(state_val) = resp.data
-    {
-        let _ = evt_tx.unbounded_send(BridgeEvent::SessionEvent {
-            active_session_id: active_session_id.to_string(),
-            event: json!({
-                "type": "desktop_state_sync",
-                "state": state_val,
-            }),
-        });
-    }
+        .await?;
+    let state = check_daemon_ok(response)?;
+    anyhow::ensure!(state.is_object(), "The daemon returned no session state");
+    Ok(state)
 }
 
 #[cfg(test)]

@@ -1,189 +1,178 @@
-use std::path::Path;
-
-use gpui::{Entity, Focusable as _, Modifiers, TestAppContext, VisualTestContext, px, size};
-use serde_json::json;
-
 use crate::state::SavedSessionRow;
 use crate::theme::DesktopPreferences;
 use crate::ui::workspace::{LaunchOptions, PrimeDesktopView};
+use rune::{Env, Runtime};
+use serde_json::json;
+use std::path::Path;
 
 const ALPHA: &str = "/work/alpha";
 const BETA: &str = "/work/beta";
 const ARCHIVE: &str = "/work/archive";
 
 fn saved(cwd: &str, name: &str) -> SavedSessionRow {
-    SavedSessionRow::from_wire(&json!({
-        "id": name, "name": name, "cwd": cwd, "path": format!("/chats/{name}.jsonl"),
-    }))
+    SavedSessionRow::from_wire(
+        &json!({"id":name,"name":name,"cwd":cwd,"path":format!("/chats/{name}.jsonl")}),
+    )
     .unwrap()
 }
 
-fn open_sidebar<'a>(
-    app: &'a mut TestAppContext,
-    profile: &Path,
-    rows: Vec<SavedSessionRow>,
-) -> (Entity<PrimeDesktopView>, &'a mut VisualTestContext) {
-    app.add_window_view(|window, cx| {
-        let mut view = PrimeDesktopView::new(
-            LaunchOptions {
-                daemon_socket: Some(profile.join("no-listener")),
-                initial_cwd: Some(ALPHA.into()),
-                ..LaunchOptions::default()
-            },
-            profile.to_owned(),
-            window,
-            cx,
-        );
-        view.prefs.project_folders = vec![ALPHA.into(), BETA.into()];
-        view.prefs.project_collapsed.insert(BETA.into(), true);
-        view.saved_sessions = rows;
-        view
-    })
+fn open_sidebar(profile: &Path, rows: Vec<SavedSessionRow>) -> Runtime<PrimeDesktopView> {
+    let mut state = PrimeDesktopView::new(
+        LaunchOptions {
+            daemon_socket: Some(profile.join("no-listener")),
+            initial_cwd: Some(ALPHA.into()),
+            ..LaunchOptions::default()
+        },
+        profile.to_owned(),
+    );
+    state.prefs.project_folders = vec![ALPHA.into(), BETA.into()];
+    state.prefs.project_collapsed.insert(BETA.into(), true);
+    state.saved_sessions = rows;
+    let mut app = Runtime::new(state, PrimeDesktopView::view, (1360., 860.), Env::default());
+    draw(&mut app);
+    app
 }
 
-fn draw(cx: &mut VisualTestContext) {
-    cx.update(|window, cx| window.draw(cx).clear());
+fn draw(app: &mut Runtime<PrimeDesktopView>) {
+    app.settle_all();
+    app.frame(1.0 / 60.0);
 }
 
-fn click(cx: &mut VisualTestContext, selector: &'static str) {
-    draw(cx);
-    let bounds = cx
-        .debug_bounds(selector)
-        .unwrap_or_else(|| panic!("missing {selector}"));
-    cx.simulate_click(bounds.center(), Modifiers::default());
-    draw(cx);
+fn visible(app: &Runtime<PrimeDesktopView>, key: &str) -> Option<[f32; 4]> {
+    app.elements()
+        .into_iter()
+        .find(|node| {
+            node.key.as_deref() == Some(key)
+                && !node.exiting
+                && node.visible[2] > 0.0
+                && node.visible[3] > 0.0
+        })
+        .map(|node| node.visible)
 }
 
-fn search(cx: &mut VisualTestContext, view: &Entity<PrimeDesktopView>, query: &str) {
-    view.update_in(cx, |view, _, cx| {
-        view.sidebar_search_input
-            .update(cx, |input, cx| input.set_text(query, cx));
-    });
-    draw(cx);
+fn click(app: &mut Runtime<PrimeDesktopView>, key: &str) {
+    draw(app);
+    let [x, y, w, h] = visible(app, key).unwrap_or_else(|| panic!("missing {key}"));
+    app.pointer_down(x + w / 2.0, y + h / 2.0);
+    app.pointer_up(x + w / 2.0, y + h / 2.0);
+    draw(app);
+}
+
+fn search(app: &mut Runtime<PrimeDesktopView>, query: &str) {
+    app.update(|s, _| s.sidebar_search_input.replace_text(query));
+    draw(app);
 }
 
 #[test]
 fn browsing_a_project_leaves_the_current_draft_until_compose_is_clicked() {
     let profile = tempfile::tempdir().unwrap();
-    let mut app = TestAppContext::single();
-    let (view, cx) = open_sidebar(
-        &mut app,
+    let mut app = open_sidebar(
         profile.path(),
         vec![saved(ALPHA, "original"), saved(BETA, "destination")],
     );
-    // This command would submit locally even without a connected daemon.
-    view.update_in(cx, |view, window, cx| {
-        view.populate_draft("/model", window, cx);
-    });
-    click(cx, "project-focus-/work/beta");
-    view.read_with(cx, |view, cx| {
-        assert_eq!(view.working_cwd, ALPHA);
-        assert_eq!(view.composer_input.read(cx).text(), "/model");
-        assert!(view.active_modal.is_none());
-        assert_eq!(view.sidebar_project.as_deref(), Some(BETA));
-    });
-    assert!(
-        cx.debug_bounds("sidebar-saved-/chats/destination.jsonl")
-            .is_some()
-    );
-    search(cx, &view, "original");
-    assert!(cx.debug_bounds("sidebar-empty").is_some());
-    click(cx, "sidebar-search-clear");
-    view.read_with(cx, |view, cx| {
-        assert!(view.sidebar_search_input.read(cx).text().is_empty());
-    });
-    click(cx, "sidebar-compose");
-    view.read_with(cx, |view, cx| {
-        assert_eq!(view.working_cwd, BETA);
-        assert!(view.composer_input.read(cx).text().is_empty());
-        assert!(view.session.active_session_id.is_empty());
-    });
-    click(cx, "sidebar-all-projects");
-    view.read_with(cx, |view, _| assert!(view.sidebar_project.is_none()));
-    click(cx, "sidebar-draft-/work/alpha");
-    view.read_with(cx, |view, cx| {
-        assert_eq!(view.working_cwd, ALPHA);
-        assert_eq!(view.composer_input.read(cx).text(), "/model");
-    });
-    app.quit();
+    app.update(|s, _| s.populate_draft("/model"));
+    click(&mut app, "project-focus-/work/beta");
+    assert_eq!(app.state.working_cwd, ALPHA);
+    assert_eq!(app.state.composer_input.text, "/model");
+    assert!(app.state.active_modal.is_none());
+    assert_eq!(app.state.sidebar_project.as_deref(), Some(BETA));
+    assert!(visible(&app, "saved-chat-/chats/destination.jsonl").is_some());
+    search(&mut app, "original");
+    assert!(visible(&app, "sidebar-empty").is_some());
+    click(&mut app, "sidebar-search-clear");
+    assert!(app.state.sidebar_search_input.text.is_empty());
+    click(&mut app, "sidebar-compose");
+    assert_eq!(app.state.working_cwd, BETA);
+    assert!(app.state.composer_input.text.is_empty());
+    assert!(app.state.session.active_session_id.is_empty());
+    click(&mut app, "sidebar-all-projects");
+    assert!(app.state.sidebar_project.is_none());
+    click(&mut app, "sidebar-draft-/work/alpha");
+    assert_eq!(app.state.working_cwd, ALPHA);
+    assert_eq!(app.state.composer_input.text, "/model");
 }
 
 #[test]
 fn search_reaches_beyond_the_project_preview_and_history_projects_can_be_pinned() {
     let profile = tempfile::tempdir().unwrap();
-    let mut app = TestAppContext::single();
     let mut rows: Vec<_> = (1..=5)
         .map(|i| saved(ALPHA, &format!("Chat {i}")))
         .collect();
-    rows.push(saved(ALPHA, "buried needle"));
-    rows.push(saved(ALPHA, "seventh"));
-    rows.push(saved(ARCHIVE, "older work"));
-    let (view, cx) = open_sidebar(&mut app, profile.path(), rows);
-    draw(cx);
-    assert!(cx.debug_bounds("project-more-/work/alpha").is_some());
-    // These rows have never been drawn. GPUI retains selector bounds after a row disappears.
-    assert!(
-        cx.debug_bounds("sidebar-saved-/chats/buried needle.jsonl")
-            .is_none()
-    );
-    assert!(cx.debug_bounds("project-focus-/work/archive").is_none());
-    search(cx, &view, "needle");
-    assert!(
-        cx.debug_bounds("sidebar-saved-/chats/buried needle.jsonl")
-            .is_some()
-    );
-    click(cx, "sidebar-search-clear");
-    click(cx, "project-more-/work/alpha");
-    view.read_with(cx, |view, _| {
-        assert_eq!(view.sidebar_project.as_deref(), Some(ALPHA));
-    });
-    assert!(
-        cx.debug_bounds("sidebar-saved-/chats/seventh.jsonl")
-            .is_some()
-    );
-    click(cx, "sidebar-all-projects");
-    click(cx, "project-toggle-/work/alpha");
-    view.read_with(cx, |view, _| {
-        assert_eq!(view.prefs.project_collapsed.get(ALPHA), Some(&true));
-    });
-    click(cx, "sidebar-history");
-    let folder = cx.debug_bounds("project-focus-/work/archive").unwrap();
-    cx.simulate_mouse_move(folder.center(), None, Modifiers::default());
-    click(cx, "project-pin-/work/archive");
+    rows.extend([
+        saved(ALPHA, "buried needle"),
+        saved(ALPHA, "seventh"),
+        saved(ARCHIVE, "older work"),
+    ]);
+    let mut app = open_sidebar(profile.path(), rows);
+    assert!(visible(&app, "project-more-/work/alpha").is_some());
+    assert!(visible(&app, "saved-chat-/chats/buried needle.jsonl").is_none());
+    assert!(visible(&app, "project-focus-/work/archive").is_none());
+    search(&mut app, "needle");
+    assert!(visible(&app, "saved-chat-/chats/buried needle.jsonl").is_some());
+    click(&mut app, "sidebar-search-clear");
+    click(&mut app, "project-more-/work/alpha");
+    assert_eq!(app.state.sidebar_project.as_deref(), Some(ALPHA));
+    assert!(visible(&app, "saved-chat-/chats/seventh.jsonl").is_some());
+    click(&mut app, "sidebar-all-projects");
+    click(&mut app, "project-toggle-/work/alpha");
+    assert_eq!(app.state.prefs.project_collapsed.get(ALPHA), Some(&true));
+    click(&mut app, "sidebar-history");
+    click(&mut app, "project-pin-/work/archive");
     let prefs = DesktopPreferences::load(profile.path());
-    assert!(prefs.project_folders.iter().any(|cwd| cwd == ARCHIVE));
-    view.read_with(cx, |view, _| assert_eq!(view.working_cwd, ALPHA));
-    app.quit();
+    assert!(prefs.project_folders.iter().any(|p| p == ARCHIVE));
+    assert_eq!(app.state.working_cwd, ALPHA);
 }
 
 #[test]
 fn narrow_drawers_are_exclusive_and_opening_a_chat_returns_focus_to_the_composer() {
-    let profile = tempfile::TempDir::new().unwrap();
-    let mut app = TestAppContext::single();
-    let (view, cx) = open_sidebar(&mut app, profile.path(), vec![saved(ALPHA, "history")]);
-    cx.simulate_resize(size(px(700.), px(640.)));
-    draw(cx);
-    view.update_in(cx, |view, window, cx| {
-        assert!(view.prefs.sidebar_open);
-        view.toggle_inspector(window, cx);
-        assert!(view.prefs.inspector_open);
-        assert!(!view.prefs.sidebar_open);
-        view.toggle_sidebar(window, cx);
-        assert!(view.prefs.sidebar_open);
-        assert!(!view.prefs.inspector_open);
-        window.focus(&view.sidebar_search_input.focus_handle(cx));
-        assert!(
-            view.sidebar_search_input
-                .focus_handle(cx)
-                .is_focused(window)
-        );
-    });
-    // The search field owns focus when selecting the only saved session row.
-    click(cx, "saved-chat");
-    view.update_in(cx, |view, window, cx| {
-        assert!(!view.prefs.sidebar_open);
-        assert!(!view.prefs.inspector_open);
-        assert!(view.composer_input.focus_handle(cx).is_focused(window));
-    });
-    app.quit();
+    let profile = tempfile::tempdir().unwrap();
+    let mut app = open_sidebar(profile.path(), vec![saved(ALPHA, "history")]);
+    app.set_viewport((700.0, 640.0), 1.0);
+    draw(&mut app);
+    draw(&mut app);
+    assert!(app.state.prefs.sidebar_open);
+    app.update(|s, _| s.toggle_inspector());
+    assert!(app.state.prefs.inspector_open);
+    assert!(!app.state.prefs.sidebar_open);
+    app.update(|s, _| s.toggle_sidebar());
+    assert!(app.state.prefs.sidebar_open);
+    assert!(!app.state.prefs.inspector_open);
+    click(&mut app, "sidebar-search");
+    assert!(app.state.sidebar_search_input.focused);
+    click(&mut app, "saved-chat-/chats/history.jsonl");
+    assert!(!app.state.prefs.sidebar_open);
+    assert!(!app.state.prefs.inspector_open);
+    assert!(app.state.composer_input.focused);
+}
+
+#[test]
+fn tab_reveals_the_focused_row_action_for_a_nested_project_path() {
+    let profile = tempfile::tempdir().unwrap();
+    let mut app = open_sidebar(profile.path(), vec![saved(ALPHA, "original")]);
+    app.set_full_keyboard_access(true);
+    let key = "project-pin-/work/alpha";
+    assert!(app.state.sidebar_focused_action.is_none());
+    assert!(visible(&app, "sidebar-draft-/work/alpha").is_none());
+
+    // Begin on a neighboring button and Tab through the normal Rune focus order.
+    click(&mut app, "project-toggle-/work/alpha");
+    for _ in 0..5 {
+        app.key(rune::Key::Tab.into());
+        draw(&mut app);
+        app.key_up(rune::Key::Tab.into());
+        draw(&mut app);
+        if app.state.sidebar_focused_action.as_deref() == Some(key) {
+            let pin = app
+                .elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(key))
+                .unwrap();
+            assert!(pin.focus_visible);
+            app.key(rune::Key::Text(" ".into()).into());
+            draw(&mut app);
+            assert!(visible(&app, "confirm-card").is_some());
+            return;
+        }
+    }
+    panic!("Tab never reached the project action");
 }

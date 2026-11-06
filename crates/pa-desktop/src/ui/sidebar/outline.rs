@@ -1,13 +1,13 @@
-//! Flatten the project outline once, then build elements only for visible rows.
+//! Flatten groups once per commit and build only rows inside the Rune scroll viewport.
 
-use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px, uniform_list};
-
-use super::rows::{chat_row, render_active_agent_row, render_project, render_saved_row};
-use super::{ROW_HEIGHT, project_tooltip};
+use super::{ROW_HEIGHT, rows};
 use crate::assets::Icon;
 use crate::state::projects::{ProjectChat, ProjectGroup};
 use crate::theme::Palette;
+use crate::ui::panel_controls::{control, label};
 use crate::ui::workspace::PrimeDesktopView;
+use rune::{El, GrowthSpec, ScrollSpec, col, row};
+use std::rc::Rc;
 
 const PREVIEW_CHATS: usize = 5;
 
@@ -101,199 +101,154 @@ fn outline_rows(
     rows
 }
 
-fn history_row(
-    count: usize,
-    open: bool,
-    searching: bool,
-    p: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    div()
-        .id("sidebar-history")
-        .debug_selector(|| "sidebar-history".into())
-        .h(px(ROW_HEIGHT))
-        .w_full()
-        .px(px(8.0))
-        .flex()
-        .items_center()
-        .gap(px(7.0))
-        .border_t_1()
-        .border_color(p.border_subtle)
-        .when(!searching, |d| {
-            d.cursor_pointer()
-                .hover(|s| s.bg(p.bg_hover))
-                .on_click(cx.listener(|view, _, _, cx| {
-                    view.sidebar_history_open = !view.sidebar_history_open;
-                    cx.notify();
-                }))
-        })
-        .child(Icon::History.render(14.0, p.text_muted))
-        .child(
-            div()
-                .flex_1()
-                .text_size(px(12.0))
-                .font_weight(FontWeight::MEDIUM)
-                .text_color(p.text_secondary)
-                .child("Folder history"),
-        )
-        .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(p.text_muted)
-                .child(count.to_string()),
-        )
-        .when(!searching, |d| {
-            d.child(
-                if open {
-                    Icon::ChevronDown
-                } else {
-                    Icon::ChevronRight
+impl OutlineRow {
+    fn key(self, groups: &[ProjectGroup], view: &PrimeDesktopView) -> String {
+        match self {
+            Self::Folder(i) => format!("folder-{}", groups[i].key()),
+            Self::Draft { group, index } => format!("draft-{}", groups[group].draft_cwds[index]),
+            Self::History(_) => "history-row".into(),
+            Self::More(i) => format!("more-{}", groups[i].key()),
+            Self::Chat(ProjectChat::Live(i)) => {
+                format!("live-{}", view.active_sessions[i].active_session_id)
+            }
+            Self::Chat(ProjectChat::Saved(i)) => format!("saved-{}", view.saved_sessions[i].path),
+        }
+    }
+
+    fn build(
+        self,
+        groups: &[ProjectGroup],
+        view: &PrimeDesktopView,
+        p: Palette,
+        searching: bool,
+    ) -> El {
+        let focused = view.sidebar_focused_action.as_deref();
+        match self {
+            Self::Folder(i) => rows::project(
+                &groups[i],
+                groups[i].folder() == Some(view.current_project()),
+                searching,
+                focused,
+                p,
+            ),
+            Self::Chat(chat @ ProjectChat::Live(i)) => rows::live_chat(
+                &view.active_sessions[i],
+                is_selected(view, chat),
+                focused,
+                p,
+            ),
+            Self::Chat(chat @ ProjectChat::Saved(i)) => {
+                rows::saved_chat(&view.saved_sessions[i], is_selected(view, chat), focused, p)
+            }
+            Self::Draft { group, index } => {
+                let group = &groups[group];
+                let cwd = group.draft_cwds[index].clone();
+                let selected = view.session.active_session_id.is_empty() && view.working_cwd == cwd;
+                let name = "Unsent draft";
+                let suffix = group
+                    .folder()
+                    .and_then(|root| std::path::Path::new(&cwd).strip_prefix(root).ok())
+                    .filter(|suffix| !suffix.as_os_str().is_empty());
+                let title = suffix.map_or_else(
+                    || name.into(),
+                    |path| format!("{name} · {}", path.display()),
+                );
+                rows::chat(
+                    format!("sidebar-draft-{cwd}"),
+                    &title,
+                    Icon::EditPen.render(12.0, p.text_muted),
+                    selected,
+                    p,
+                )
+                .help(format!("{name} in {cwd}"))
+                .on_press(move |s: &mut PrimeDesktopView| s.new_project_chat(&cwd))
+            }
+            Self::More(i) => {
+                let cwd = groups[i].key().to_owned();
+                let title = format!("View all {} chats", groups[i].chats.len());
+                control(format!("project-more-{cwd}"), &title, p)
+                    .h(ROW_HEIGHT)
+                    .pl(42.0)
+                    .center_y()
+                    .child(label(title, 11.5, 400.0, p.text_secondary))
+                    .on_press(move |s: &mut PrimeDesktopView| s.focus_sidebar_project(&cwd))
+            }
+            Self::History(n) => {
+                let mut header = row()
+                    .key("sidebar-history")
+                    .role("button")
+                    .label("Folder history")
+                    .h(ROW_HEIGHT)
+                    .px(8.0)
+                    .center_y()
+                    .gap(7.0)
+                    .child(Icon::History.render(14.0, p.text_muted))
+                    .child(label("Folder history", 12.0, 500.0, p.text_secondary).grow(1.0))
+                    .child(label(n.to_string(), 11.0, 400.0, p.text_muted));
+                if !searching {
+                    let icon = if view.sidebar_history_open {
+                        Icon::ChevronDown
+                    } else {
+                        Icon::ChevronRight
+                    };
+                    header = header
+                        .child(icon.render(12.0, p.text_muted))
+                        .focusable(true)
+                        .hover(p.bg_hover)
+                        .cursor(rune::Cursor::Pointer)
+                        .on_press(|s: &mut PrimeDesktopView| {
+                            s.sidebar_history_open = !s.sidebar_history_open;
+                        });
                 }
-                .render(12.0, p.text_muted),
-            )
-        })
-        .into_any_element()
+                header
+            }
+        }
+    }
 }
 
-fn draft_row(
-    cwd: &str,
-    project: &ProjectGroup,
-    view: &PrimeDesktopView,
-    p: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let selected = view.session.active_session_id.is_empty() && view.working_cwd == cwd;
-    let blank =
-        selected && view.composer_input.read(cx).text().is_empty() && view.staged_images.is_empty();
-    let name = if blank { "New chat" } else { "Unsent draft" };
-    let suffix = project
-        .folder()
-        .and_then(|root| std::path::Path::new(cwd).strip_prefix(root).ok())
-        .filter(|s| !s.as_os_str().is_empty());
-    let label = suffix.map_or_else(|| name.into(), |p| format!("{name} · {}", p.display()));
-    let cwd = cwd.to_owned();
-    chat_row(
-        format!("draft-{cwd}").into(),
-        Icon::EditPen.render(12.0, p.text_muted),
-        label.into(),
-        selected,
-        p,
-    )
-    .debug_selector(|| format!("sidebar-draft-{cwd}"))
-    .tooltip(project_tooltip(format!("{name} in {cwd}").into(), p))
-    .on_click(cx.listener(move |view, _, window, cx| view.new_project_chat(&cwd, window, cx)))
-    .into_any_element()
-}
-
-fn more_row(group: &ProjectGroup, p: Palette, cx: &mut Context<PrimeDesktopView>) -> AnyElement {
-    let cwd = group.key().to_owned();
-    div()
-        .id(SharedString::from(format!("more-{cwd}")))
-        .debug_selector(|| format!("project-more-{cwd}"))
-        .h(px(ROW_HEIGHT))
-        .w_full()
-        .pl(px(43.0))
-        .flex()
-        .items_center()
-        .gap(px(4.0))
-        .rounded_md()
-        .cursor_pointer()
-        .hover(|s| s.bg(p.bg_hover))
-        .text_size(px(11.5))
-        .text_color(p.text_secondary)
-        .on_click(cx.listener(move |view, _, _, cx| view.focus_sidebar_project(&cwd, cx)))
-        .child(format!("View all {} chats", group.chats.len()))
-        .child(Icon::ChevronRight.render(11.0, p.text_muted))
-        .into_any_element()
-}
-
-pub(super) fn render_outline(
-    view: &PrimeDesktopView,
-    p: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let query = view.sidebar_search_input.read(cx).text();
+pub(super) fn render(view: &PrimeDesktopView, p: Palette) -> El {
+    let query = &view.sidebar_search_input.text;
     let searching = !query.trim().is_empty();
     let groups = view.project_groups(query);
     let rows = outline_rows(&groups, view, searching);
-    let empty = rows.is_empty();
-    let scoped = view.sidebar_project.is_some();
-    // Each project has a fresh viewport when entered from deep in the overview.
-    let list_id = SharedString::from(format!(
-        "outline-{}-{searching}",
-        view.sidebar_project.as_deref().unwrap_or("")
-    ));
-    div()
-        .px(px(7.0))
-        .pb(px(6.0))
-        .min_h_0()
-        .flex_1()
-        .flex()
-        .flex_col()
-        .overflow_hidden()
-        .when(empty, |d| {
-            d.child(
-                div()
-                    .debug_selector(|| "sidebar-empty".into())
-                    .px(px(9.0))
-                    .py(px(12.0))
-                    .text_size(px(12.0))
-                    .text_color(p.text_muted)
-                    .child(match (scoped, searching) {
-                        (true, false) => "No chats in this project yet.",
-                        (true, true) => "No matching chats in this project.",
-                        _ => "No matching projects or chats.",
-                    }),
-            )
-        })
-        .child(
-            uniform_list(
-                list_id,
-                rows.len(),
-                cx.processor(move |view, range: std::ops::Range<usize>, _, cx| {
-                    range
-                        .filter_map(|i| {
-                            Some(match *rows.get(i)? {
-                                OutlineRow::Folder(i) => render_project(
-                                    &groups[i],
-                                    groups[i].folder() == Some(view.current_project()),
-                                    searching,
-                                    p,
-                                    cx,
-                                ),
-                                OutlineRow::Draft { group, index } => draft_row(
-                                    &groups[group].draft_cwds[index],
-                                    &groups[group],
-                                    view,
-                                    p,
-                                    cx,
-                                ),
-                                OutlineRow::More(i) => more_row(&groups[i], p, cx),
-                                OutlineRow::History(count) => {
-                                    history_row(count, view.sidebar_history_open, searching, p, cx)
-                                }
-                                OutlineRow::Chat(chat @ ProjectChat::Live(index)) => {
-                                    render_active_agent_row(
-                                        view.active_sessions.get(index)?,
-                                        is_selected(view, chat),
-                                        p,
-                                        cx,
-                                    )
-                                }
-                                OutlineRow::Chat(chat @ ProjectChat::Saved(index)) => {
-                                    render_saved_row(
-                                        view.saved_sessions.get(index)?,
-                                        is_selected(view, chat),
-                                        p,
-                                        cx,
-                                    )
-                                }
-                            })
-                        })
-                        .collect()
-                }),
-            )
-            .flex_1(),
-        )
-        .into_any_element()
+    let scope = view.sidebar_project.as_deref();
+    let viewport = col()
+        .key(format!("outline-{}-{searching}", scope.unwrap_or("")))
+        .grow(1.0)
+        .min_h(0.0)
+        .px(7.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        });
+    if rows.is_empty() {
+        let message = match (scope.is_some(), searching) {
+            (true, false) => "No chats in this project yet.",
+            (true, true) => "No matching chats in this project.",
+            _ => "No matching projects or chats.",
+        };
+        return viewport.child(
+            label(message, 12.0, 400.0, p.text_muted)
+                .key("sidebar-empty")
+                .padding(9.0)
+                .wrap(),
+        );
+    }
+    let count = rows.len();
+    let data = Rc::new((groups, rows));
+    let keys = Rc::clone(&data);
+    viewport.child(
+        col()
+            .key("outline-rows")
+            .growth(GrowthSpec::default())
+            .virtual_rows(
+                count,
+                ROW_HEIGHT,
+                move |v: &PrimeDesktopView, i| keys.1[i].key(&keys.0, v).into(),
+                move |v: &PrimeDesktopView, i| {
+                    col()
+                        .h(ROW_HEIGHT)
+                        .child(data.1[i].build(&data.0, v, p, searching))
+                },
+            ),
+    )
 }

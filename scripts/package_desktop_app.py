@@ -169,6 +169,8 @@ DESKTOP_NOTICES = (
     "LICENSE",
     "crates/pa-desktop/ICON-LICENSE",
     "crates/pa-desktop/FONT-LICENSE",
+    "crates/pa-desktop/RUNE-LICENSE",
+    "crates/pa-desktop/INTER-LICENSE",
 )
 HARNESS_NOTICES = {
     "LICENSE": "LICENSE",

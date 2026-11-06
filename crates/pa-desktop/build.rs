@@ -28,7 +28,7 @@ fn main() {
         .status()
         .expect("run the macOS compiler");
     assert!(status.success(), "failed to compile the Sparkle updater");
-    // Keep library consumers and GPUI's headless tests independent of app bundle layout.
+    // Keep library consumers and Rune's headless tests independent of app bundle layout.
     for arg in [
         object.display().to_string(),
         format!("-F{}", sdk.display()),

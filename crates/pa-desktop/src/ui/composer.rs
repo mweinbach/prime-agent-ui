@@ -1,16 +1,18 @@
-//! Prompt composer, staged attachments, command suggestions and live turn controls.
+//! Prompt editing, slash completion, staged attachments and live turn controls.
 
-use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
+use rune::{
+    Align, Cursor, Cx, El, Key, KeyEvent, ScrollSpec, Side, TextStyle, auto_grow, col, el, row,
+};
 
+use super::selectable_text::{control, icon_control, label};
+use super::text_input::{LINE_HEIGHT, dismiss, field};
+use super::workspace::PrimeDesktopView;
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
-use crate::state::{ActiveModal, truncate_chars};
-use crate::theme::{Palette, font_mono};
-use crate::ui::text_input::{Down, Up};
-use crate::ui::tool_cards::pill;
-use crate::ui::workspace::{CompleteSlash, PrimeDesktopView};
+use crate::state::ActiveModal;
+use crate::theme::Palette;
 
-const SLASH_SUGGESTIONS: [(&str, &str); 8] = [
+const SLASH_SUGGESTIONS: [(&str, &str); 9] = [
     ("/compact", "Summarize & compact conversation context"),
     ("/refine", "Refine the session harness"),
     (
@@ -22,6 +24,7 @@ const SLASH_SUGGESTIONS: [(&str, &str); 8] = [
         "Reload skills, system prompt, and session configuration",
     ),
     ("/model", "Choose a model"),
+    ("/login", "Connect an inference provider"),
     (
         "/btw ",
         "Ask a parallel side question without interrupting the turn",
@@ -47,501 +50,546 @@ pub(super) fn slash_matches(draft: &str) -> Vec<(&'static str, &'static str)> {
         .collect()
 }
 
-#[must_use]
-#[allow(clippy::too_many_lines)]
-pub fn render_composer(
-    view: &PrimeDesktopView,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let draft = view.composer_input.read(cx).text().to_string();
-    let trimmed = draft.trim();
-    let is_bash_bang = trimmed.starts_with('!');
-    let is_streaming = view.session.is_streaming;
-
-    let slash_matches = slash_matches(&draft);
-    let match_count = slash_matches.len();
-
-    div()
-        .when(match_count > 0, |d| {
-            d.key_context("PaCompletions")
-                .capture_action(cx.listener(move |view, _: &Up, _, cx| {
-                    view.slash_selected_idx = view.slash_selected_idx.saturating_sub(1);
-                    cx.stop_propagation();
-                    cx.notify();
-                }))
-                .capture_action(cx.listener(move |view, _: &Down, _, cx| {
-                    view.slash_selected_idx = (view.slash_selected_idx + 1).min(match_count - 1);
-                    cx.stop_propagation();
-                    cx.notify();
-                }))
-                .on_action(cx.listener(|view, _: &CompleteSlash, window, cx| {
-                    view.complete_slash(window, cx);
-                }))
-        })
+pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktopView>) -> El {
+    let draft = &view.composer_input.text;
+    let shell = draft.trim_start().starts_with('!');
+    let mut section = col()
+        .key("composer")
+        // A completed file load inserts a row above the editor. Its hit targets
+        // and the editor must move together in the same frame.
+        .instant_changes()
         .w_full()
-        .flex()
-        .justify_center()
-        .child(
-            div()
+        .gap(8.)
+        .on_drop_files(|s: &mut PrimeDesktopView, files, _| s.attach_files(files.to_vec()));
+    if !view.session.queued.is_empty() {
+        section = section.child(queued(view, p));
+    }
+    let matches = slash_matches(draft);
+    if !matches.is_empty() {
+        let selected = view.slash_selected_idx.min(matches.len() - 1);
+        let mut options = col()
+            .role("list")
+            .gap(2.)
+            .padding(5.)
+            .fill(p.bg_elevated)
+            .border(1., p.border_strong)
+            .radius(10.);
+        for (i, (command, description)) in matches.into_iter().enumerate() {
+            let mut option = control(&format!("slash-opt-{command}"), command, p)
+                .justify_between()
                 .w_full()
-                .max_w(px(720.0))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                // Queued Steering / Follow-Up Strip
-                .when(!view.session.queued.is_empty(), |d| {
-                    d.child(render_queued_strip(view, palette, cx))
-                })
-                // Slash Autocomplete Popover
-                .when(!slash_matches.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .w_full()
-                            .rounded_xl()
-                            .border_1()
-                            .border_color(palette.border_strong)
-                            .bg(palette.bg_elevated)
-                            .p(px(6.0))
-                            .flex()
-                            .flex_col()
-                            .gap(px(2.0))
-                            .children(slash_matches.into_iter().enumerate().map(
-                                |(index, (cmd, desc))| {
-                                    div()
-                                        .id(SharedString::from(format!("slash-opt-{cmd}")))
-                                        .when(index == view.slash_selected_idx, |d| {
-                                            d.bg(palette.bg_selected)
-                                        })
-                                        .px(px(10.0))
-                                        .py(px(6.0))
-                                        .rounded_lg()
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(palette.bg_hover))
-                                        .flex()
-                                        .items_center()
-                                        .justify_between()
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.populate_draft(cmd, window, cx);
-                                        }))
-                                        .child(
-                                            div()
-                                                .font_family(font_mono())
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_size(px(12.5))
-                                                .text_color(palette.accent)
-                                                .child(cmd),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(12.0))
-                                                .text_color(palette.text_secondary)
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(desc),
-                                        )
-                                },
-                            )),
-                    )
-                })
-                // Main Floating Composer Card
+                .child(label(command, 13., p.accent))
                 .child(
-                    div()
-                        .w_full()
-                        .rounded_2xl()
-                        .border_1()
-                        .border_color(if is_bash_bang {
-                            palette.warning
-                        } else {
-                            palette.border_strong
-                        })
-                        .bg(palette.bg_elevated)
-                        .shadow_sm()
-                        .px(px(16.0))
-                        .pt(px(16.0))
-                        .pb(px(12.0))
-                        .flex()
-                        .flex_col()
-                        .gap(px(10.0))
-                        // Staged images strip
-                        .when(!view.staged_images.is_empty(), |d| {
-                            d.child(div().flex().flex_wrap().gap(px(6.0)).children(
-                                view.staged_images.iter().enumerate().map(|(idx, img)| {
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .px(px(8.0))
-                                        .py(px(3.5))
-                                        .rounded_lg()
-                                        .bg(palette.info_soft)
-                                        .child(Icon::Image.render(12.5, palette.info))
-                                        .child(
-                                            div()
-                                                .font_family(font_mono())
-                                                .text_size(px(11.5))
-                                                .text_color(palette.info)
-                                                .child(truncate_chars(&img.filename, 24)),
-                                        )
-                                        .child(
-                                            div()
-                                                .id(SharedString::from(format!("rm-img-{idx}")))
-                                                .cursor_pointer()
-                                                .on_click(cx.listener(move |this, _, _, cx| {
-                                                    if idx < this.staged_images.len() {
-                                                        this.staged_images.remove(idx);
-                                                        cx.notify();
-                                                    }
-                                                }))
-                                                .child(Icon::Close.render(11.0, palette.info)),
-                                        )
-                                }),
-                            ))
-                        })
-                        // Multi-line GPUI Editor
-                        .child(view.composer_input.clone())
-                        // Bottom Control Bar
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_wrap()
-                                        .items_center()
-                                        .gap(px(6.0))
-                                        .child(
-                                            div()
-                                                .id("composer-attach-img-btn")
-                                                .p(px(6.0))
-                                                .rounded_md()
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(palette.bg_hover))
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.prompt_attach_images(window, cx);
-                                                }))
-                                                .child(
-                                                    Icon::Image
-                                                        .render(17.0, palette.text_secondary),
-                                                ),
-                                        )
-                                        .child(
-                                            div().w(px(1.0)).h(px(15.0)).bg(palette.border_subtle),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("composer-model-pill")
-                                                .min_w_0()
-                                                .px(px(7.0))
-                                                .py(px(5.0))
-                                                .rounded_md()
-                                                .flex()
-                                                .items_center()
-                                                .gap(px(5.0))
-                                                .cursor_pointer()
-                                                .hover(|s| s.bg(palette.bg_hover))
-                                                .on_click(cx.listener(|this, _, window, cx| {
-                                                    this.open_modal(
-                                                        ActiveModal::ModelPicker,
-                                                        window,
-                                                        cx,
-                                                    );
-                                                }))
-                                                .child(
-                                                    div()
-                                                        .truncate()
-                                                        .text_size(px(12.5))
-                                                        .text_color(palette.text_primary)
-                                                        .child(
-                                                            view.session
-                                                                .model_id
-                                                                .as_deref()
-                                                                .unwrap_or("Select model")
-                                                                .to_string(),
-                                                        ),
-                                                )
-                                                .child(
-                                                    Icon::ChevronDown
-                                                        .render(12.0, palette.text_muted),
-                                                ),
-                                        )
-                                        .when(!view.session.thinking_level.is_empty(), |d| {
-                                            d.child(
-                                                div()
-                                                    .id("composer-effort-pill")
-                                                    .flex_none()
-                                                    .whitespace_nowrap()
-                                                    .px(px(7.0))
-                                                    .py(px(5.0))
-                                                    .rounded_md()
-                                                    .cursor_pointer()
-                                                    .hover(|s| s.bg(palette.bg_hover))
-                                                    .text_size(px(12.0))
-                                                    .text_color(palette.text_secondary)
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.cycle_thinking_level(cx);
-                                                    }))
-                                                    .child(format!(
-                                                        "Effort: {}",
-                                                        view.session.thinking_level
-                                                    )),
-                                            )
-                                        })
-                                        .when(is_bash_bang, |d| {
-                                            d.child(
-                                                div()
-                                                    .id("composer-bash-prefix-btn")
-                                                    .px(px(7.0))
-                                                    .py(px(4.0))
-                                                    .rounded_md()
-                                                    .cursor_pointer()
-                                                    .bg(palette.warning_soft)
-                                                    .font_family(font_mono())
-                                                    .text_size(px(11.5))
-                                                    .text_color(palette.warning)
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.toggle_bash_prefix(window, cx);
-                                                    }))
-                                                    .child("Shell ×"),
-                                            )
-                                        }),
-                                )
-                                // Right Controls: Context usage meter + Steer / Queue / Stop / Send
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(7.0))
-                                        .when_some(view.telemetry.context_percent, |d, percent| {
-                                            d.child(
-                                                div()
-                                                    .text_size(px(11.5))
-                                                    .text_color(palette.text_muted)
-                                                    .font_family(font_mono())
-                                                    .flex_none()
-                                                    .whitespace_nowrap()
-                                                    .child(format!("{percent:.0}% context")),
-                                            )
-                                        })
-                                        .children(if is_streaming {
-                                            vec![
-                                                // Steer mid-turn
-                                                div()
-                                                    .id("composer-steer-btn")
-                                                    .px(px(9.0))
-                                                    .py(px(5.0))
-                                                    .rounded_lg()
-                                                    .bg(palette.accent_soft)
-                                                    .hover(|s| s.bg(palette.accent.opacity(0.28)))
-                                                    .cursor_pointer()
-                                                    .flex()
-                                                    .items_center()
-                                                    .gap(px(5.0))
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.submit_steer(window, cx);
-                                                    }))
-                                                    .child(Icon::Steer.render(12.5, palette.accent))
-                                                    .child(
-                                                        div()
-                                                            .text_size(px(12.0))
-                                                            .font_weight(FontWeight::MEDIUM)
-                                                            .text_color(palette.accent)
-                                                            .child("Steer"),
-                                                    )
-                                                    .into_any_element(),
-                                                // Queue follow-up
-                                                div()
-                                                    .id("composer-queue-btn")
-                                                    .px(px(9.0))
-                                                    .py(px(5.0))
-                                                    .rounded_lg()
-                                                    .border_1()
-                                                    .border_color(palette.border_subtle)
-                                                    .hover(|s| s.bg(palette.bg_hover))
-                                                    .cursor_pointer()
-                                                    .text_size(px(12.0))
-                                                    .text_color(palette.text_secondary)
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.submit_follow_up(window, cx);
-                                                    }))
-                                                    .child("Queue")
-                                                    .into_any_element(),
-                                                // Stop / Abort
-                                                div()
-                                                    .id("composer-stop-btn")
-                                                    .w(px(30.0))
-                                                    .h(px(30.0))
-                                                    .rounded_full()
-                                                    .bg(palette.danger)
-                                                    .hover(|s| s.opacity(0.88))
-                                                    .cursor_pointer()
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .on_click(cx.listener(|this, _, _, _cx| {
-                                                        if !this
-                                                            .session
-                                                            .active_session_id
-                                                            .is_empty()
-                                                        {
-                                                            this.bridge.send(
-                                                                BridgeRequest::AbortSession {
-                                                                    active_session_id: this
-                                                                        .session
-                                                                        .active_session_id
-                                                                        .clone(),
-                                                                },
-                                                            );
-                                                        }
-                                                    }))
-                                                    .child(
-                                                        Icon::Stop
-                                                            .render(13.5, palette.text_on_accent),
-                                                    )
-                                                    .into_any_element(),
-                                            ]
-                                        } else {
-                                            let can_send = !trimmed.is_empty()
-                                                || !view.staged_images.is_empty();
-                                            vec![
-                                                div()
-                                                    .id("composer-send-btn")
-                                                    .w(px(34.0))
-                                                    .h(px(34.0))
-                                                    .rounded_full()
-                                                    .bg(if can_send {
-                                                        palette.accent
-                                                    } else {
-                                                        palette.bg_hover
-                                                    })
-                                                    .when(can_send, |d| {
-                                                        d.hover(|s| s.bg(palette.accent_hover))
-                                                            .cursor_pointer()
-                                                    })
-                                                    .flex()
-                                                    .items_center()
-                                                    .justify_center()
-                                                    .on_click(cx.listener(|this, _, window, cx| {
-                                                        this.submit_composer(window, cx);
-                                                    }))
-                                                    .child(Icon::Send.render(
-                                                        15.0,
-                                                        if can_send {
-                                                            palette.text_on_accent
-                                                        } else {
-                                                            palette.text_muted
-                                                        },
-                                                    ))
-                                                    .into_any_element(),
-                                            ]
-                                        }),
-                                ),
-                        ),
-                ),
+                    label(description, 12., p.text_secondary)
+                        .min_w(0.)
+                        .truncate(),
+                )
+                .on_press(move |s: &mut PrimeDesktopView| s.populate_draft(command));
+            if i == selected {
+                option = option.fill(p.bg_selected);
+            }
+            options = options.child(option);
+        }
+        section = section.child(options);
+    }
+    let focused = view.composer_input.focused;
+    let border = if shell {
+        p.warning
+    } else if focused {
+        p.text_muted.alpha(0.62)
+    } else {
+        p.border_strong
+    };
+    let mut card = col()
+        .w_full()
+        .gap(12.)
+        .px(18.)
+        .pt(18.)
+        .pb(12.)
+        .fill(p.bg_elevated)
+        .radius(19.)
+        .border(1., border)
+        .shadow(3., 10., rune::Color::BLACK.alpha(0.09));
+
+    if !view.staged_attachments.is_empty() || view.attachments_loading() {
+        card = card.child(super::attachment_preview::staged(view, p));
+    }
+    // Up/Down move through wrapped text normally. Only the outermost visual lines
+    // recall history, including the ends of a long scrolled draft.
+    let edge_lines = cx
+        .window_layout("composer-input")
+        .zip(cx.caret("composer-input"))
+        .map(|([_, top, _, height], [_, caret, _, caret_height])| {
+            let center = caret + caret_height / 2.;
+            (
+                center < top + LINE_HEIGHT,
+                center > top + height - LINE_HEIGHT,
+            )
+        })
+        .unwrap_or_default();
+    let input = field(
+        "composer-input",
+        &view.composer_input,
+        "Message Prime Agent…",
+        p,
+        |s| &mut s.composer_input,
+    )
+    .font(rune::TextStyle::new(15., 400.).lh(LINE_HEIGHT))
+    .no_focus_ring()
+    .on_input_change(|s: &mut PrimeDesktopView, _| s.composer_edited())
+    .on_submit(|s: &mut PrimeDesktopView, _| submit(s))
+    .on_input_key(move |s: &mut PrimeDesktopView, event, _| composer_key(s, event, edge_lines));
+
+    let model = view.current_catalog_model();
+    let model_name = model
+        .map(|m| m.name.as_str())
+        .filter(|n| !n.is_empty())
+        .or(view.session.model_id.as_deref())
+        .unwrap_or("Select model");
+    let effort = view.session.thinking_level.as_str();
+    let has_choices = model.is_some_and(|m| m.supported_levels.len() > 1);
+    let reasoning = if model.is_some_and(|m| m.supported_levels.iter().any(|level| level == effort))
+    {
+        format!("{} reasoning", effort_name(effort))
+    } else {
+        "Reasoning".into()
+    };
+    let can_open = view.can_open_reasoning_picker();
+    let show_reasoning =
+        has_choices || (model.is_none() && (can_open || view.reasoning_picker_open));
+    let mut tools = row()
+        .min_w(0.)
+        .items_center()
+        .gap(3.)
+        .flex_wrap()
+        .child(
+            icon_control(
+                "composer-attach-img-btn",
+                "Attach files or images",
+                Icon::Plus,
+                p,
+            )
+            .size(30., 30.)
+            .on_press(PrimeDesktopView::prompt_attach_files),
         )
-        .into_any_element()
+        .child(
+            control("composer-model-pill", "Select model", p)
+                .h(30.)
+                .gap(5.)
+                .px(6.)
+                .help("Select model")
+                .child(
+                    label(model_name, 12.5, p.text_primary)
+                        .font(TextStyle::new(12.5, 550.))
+                        .max_w(200.)
+                        .min_w(0.)
+                        .truncate(),
+                )
+                .child(Icon::ChevronDown.render(11., p.text_muted))
+                .on_press(|s: &mut PrimeDesktopView| s.open_modal(ActiveModal::ModelPicker)),
+        );
+    if show_reasoning {
+        tools = tools.child(
+            control("composer-effort-pill", "Reasoning effort", p)
+                .h(30.)
+                .gap(5.)
+                .px(6.)
+                .expanded(view.reasoning_picker_open)
+                .help("Choose reasoning effort")
+                .disabled(!can_open && !view.reasoning_picker_open)
+                .preserve_focus_on_press(false)
+                .child(label(reasoning, 12.5, p.text_secondary))
+                .child(Icon::ChevronDown.render(11., p.text_muted))
+                .on_press(PrimeDesktopView::open_reasoning_picker),
+        );
+    }
+    if shell {
+        tools = tools.child(
+            control("composer-bash-prefix-btn", "Remove shell prefix", p)
+                .fill(p.warning_soft)
+                .child(label("Shell ×", 12., p.warning))
+                .on_press(PrimeDesktopView::toggle_bash_prefix),
+        );
+    }
+    let mut actions = row().center_y().gap(4.);
+    if let Some(percent) = view
+        .telemetry
+        .context_percent
+        .filter(|percent| *percent >= 1.)
+    {
+        actions = actions.child(label(format!("{percent:.0}% context"), 11.5, p.text_muted));
+    }
+    if view.session.is_streaming {
+        actions = actions
+            .child(
+                control("composer-steer-btn", "Steer", p)
+                    .fill(p.accent_soft)
+                    .child(Icon::Steer.render(13., p.accent))
+                    .child(label("Steer", 12., p.accent))
+                    .on_press(PrimeDesktopView::submit_steer),
+            )
+            .child(
+                control("composer-queue-btn", "Queue follow-up", p)
+                    .border(1., p.border_subtle)
+                    .child(label("Queue", 12., p.text_secondary))
+                    .on_press(PrimeDesktopView::submit_follow_up),
+            )
+            .child(
+                icon_control("composer-stop-btn", "Stop response", Icon::Stop, p)
+                    .fill(p.danger_soft)
+                    .on_press(|s: &mut PrimeDesktopView| {
+                        s.bridge.send(BridgeRequest::AbortSession {
+                            active_session_id: s.session.active_session_id.clone(),
+                        });
+                    }),
+            );
+    } else {
+        let enabled = !draft.trim().is_empty() || !view.staged_attachments.is_empty();
+        actions = actions.child(
+            control("composer-send-btn", "Send message", p)
+                .size(34., 34.)
+                .padding(0.)
+                .radius(11.)
+                .help("Send message")
+                .fill(if enabled { p.accent } else { p.bg_user_bubble })
+                .disabled(!enabled)
+                .child(Icon::Send.render(
+                    16.,
+                    if enabled {
+                        p.text_on_accent
+                    } else {
+                        p.text_muted
+                    },
+                ))
+                .on_press(PrimeDesktopView::submit_composer),
+        );
+    }
+    card = card
+        .child(auto_grow(
+            input,
+            if view.session.entries.is_empty() {
+                3
+            } else {
+                2
+            },
+            7,
+        ))
+        .child(
+            row()
+                .w_full()
+                .center_y()
+                .justify_between()
+                .flex_wrap()
+                .gap(5.)
+                .child(tools)
+                .child(actions),
+        );
+    section.child(card)
 }
 
-fn render_queued_strip(
-    view: &PrimeDesktopView,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let sid = view.session.active_session_id.clone();
-    let sid_clear = sid.clone();
-    let total = view.session.queued.steering.len() + view.session.queued.follow_ups.len();
+fn effort_name(level: &str) -> &str {
+    match level {
+        "off" => "Off",
+        "minimal" => "Minimal",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "Extra high",
+        "max" => "Maximum",
+        other => other,
+    }
+}
 
-    div()
-        .w_full()
-        .px(px(12.0))
-        .py(px(7.0))
-        .rounded_xl()
-        .border_1()
-        .border_color(palette.border_subtle)
-        .bg(palette.bg_elevated)
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .child(pill(
-                    &format!("Queued ({total})"),
-                    palette.warning_soft,
-                    palette.warning,
-                ))
+impl PrimeDesktopView {
+    /// Mount at the window root so the menu can flip above a bottom-docked composer
+    /// and float outside the welcome and transcript scroll viewports.
+    pub(in crate::ui) fn reasoning_picker(&self, p: Palette) -> Option<El> {
+        if !self.reasoning_picker_open {
+            return None;
+        }
+        let mut options = col()
+            .key("reasoning-options")
+            .role("listbox")
+            .label("Reasoning effort")
+            .focus_group()
+            .gap(1.)
+            .min_h(0.)
+            .max_h(248.)
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            });
+        if let Some(model) = self
+            .current_catalog_model()
+            .filter(|m| !m.supported_levels.is_empty())
+        {
+            for (index, level) in model.supported_levels.iter().enumerate() {
+                let selected = self.session.thinking_level == *level;
+                let (session, provider, model_id) = (
+                    self.session.active_session_id.clone(),
+                    model.provider.clone(),
+                    model.id.clone(),
+                );
+                let id = level.clone();
+                let mut option = row()
+                    .key(format!("reasoning-level-{level}"))
+                    .role("option")
+                    .label(effort_name(level))
+                    .focusable(true)
+                    .focus_selected(selected)
+                    .position_in_set(index + 1, model.supported_levels.len())
+                    .h(30.)
+                    .px(9.)
+                    .gap(12.)
+                    .radius(5.)
+                    .items_center()
+                    .cursor(Cursor::Pointer)
+                    .hover(p.bg_hover)
+                    .focus_highlight(p.bg_hover)
+                    .child(label(effort_name(level), 13., p.text_primary).grow(1.))
+                    .on_press(move |s: &mut Self| {
+                        s.select_reasoning_level(&session, &provider, &model_id, &id);
+                    });
+                if selected {
+                    option = option.child(Icon::Check.render(14., p.text_primary));
+                }
+                options = options.child(option);
+            }
+        } else {
+            let message = if self.daemon_connected
+                && (!self.model_catalog_loaded() || self.session.active_session_id.is_empty())
+            {
+                "Loading session settings…"
+            } else {
+                "No reasoning levels available for this model."
+            };
+            options = options.child(label(message, 12., p.text_secondary).wrap().padding(8.));
+        }
+        let surface = col()
+            .key("reasoning-picker")
+            .label("Reasoning effort")
+            .hit()
+            .w(178.)
+            .padding(5.)
+            .radius(9.)
+            .fill(p.bg_elevated)
+            .border(1., p.border_strong)
+            .shadow(3., 12., rune::Color::BLACK.alpha(0.16))
+            .focus_return("composer-effort-pill")
+            .modal(true, Self::close_reasoning_picker)
+            .anchored_fit("composer-effort-pill", Side::Top, Align::Start, 5.)
+            .child(options);
+        Some(
+            el().key("reasoning-layer")
+                .pin(Some(0.), Some(0.), Some(0.), Some(0.))
                 .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(palette.text_secondary)
-                        .min_w_0()
-                        .truncate()
-                        .child(
-                            view.session
-                                .queued
-                                .steering
-                                .first()
-                                .or_else(|| view.session.queued.follow_ups.first())
-                                .or(view.session.queued.preparing.as_ref())
-                                .map_or_else(String::new, |s| truncate_chars(s, 54)),
-                        ),
-                ),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(6.0))
-                .flex_none()
-                .whitespace_nowrap()
-                .child(
-                    div()
-                        .id("queue-send-now-btn")
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .bg(palette.accent_soft)
-                        .text_size(px(11.5))
-                        .text_color(palette.accent)
-                        .on_click(cx.listener(move |this, _, _, _cx| {
-                            if !sid.is_empty() {
-                                this.bridge.send(BridgeRequest::AbortAndSendQueued {
-                                    active_session_id: sid.clone(),
-                                });
-                            }
-                        }))
-                        .child("Interrupt & send"),
+                    el().key("reasoning-outside")
+                        .role("none")
+                        .w_full()
+                        .h_full()
+                        .on_press(Self::close_reasoning_picker),
                 )
-                .child(
-                    div()
-                        .id("queue-clear-btn")
-                        .px(px(8.0))
-                        .py(px(3.0))
-                        .rounded_md()
-                        .cursor_pointer()
-                        .hover(|s| s.bg(palette.bg_hover))
-                        .text_size(px(11.5))
-                        .text_color(palette.text_muted)
-                        .on_click(cx.listener(move |this, _, _, _cx| {
-                            if !sid_clear.is_empty() {
-                                this.bridge.send(BridgeRequest::ClearQueue {
-                                    active_session_id: sid_clear.clone(),
-                                });
-                            }
-                        }))
-                        .child("Clear"),
-                ),
+                .child(surface),
         )
-        .into_any_element()
+    }
+}
+
+fn submit(s: &mut PrimeDesktopView) {
+    if !s.complete_slash() {
+        s.submit_composer();
+    }
+}
+
+fn composer_key(s: &mut PrimeDesktopView, event: &KeyEvent, edge_lines: (bool, bool)) -> bool {
+    if event.mods.shift || event.mods.alt || s.composer_input.preedit.is_some() {
+        return false;
+    }
+    // Explicitly keep plain Return as Send, including inside code/list-looking prompts.
+    if dismiss(s, event) {
+        return true;
+    }
+    if event.key == Key::Enter {
+        submit(s);
+        return true;
+    }
+    if event.mods.cmd || event.mods.ctrl {
+        return false;
+    }
+    let matches = slash_matches(&s.composer_input.text);
+    if !matches.is_empty() {
+        let selected = s.slash_selected_idx.min(matches.len() - 1);
+        match event.key {
+            Key::Up => s.slash_selected_idx = selected.saturating_sub(1),
+            Key::Down => s.slash_selected_idx = (selected + 1).min(matches.len() - 1),
+            Key::Tab => return s.complete_slash(),
+            _ => return false,
+        }
+        return true;
+    }
+    let edit = &s.composer_input;
+    if edit.anchor == edit.focus
+        && ((event.key == Key::Up && (edit.focus == 0 || edge_lines.0))
+            || (event.key == Key::Down && (edit.focus == edit.text.len() || edge_lines.1)))
+    {
+        return s.composer_history(event.key == Key::Up);
+    }
+    false
+}
+
+fn queued(s: &PrimeDesktopView, p: Palette) -> El {
+    let queue = &s.session.queued;
+    let count = queue.steering.len() + queue.follow_ups.len();
+    let first = queue
+        .steering
+        .first()
+        .or_else(|| queue.follow_ups.first())
+        .or(queue.preparing.as_ref());
+    row()
+        .key("queued-messages")
+        .w_full()
+        .center_y()
+        .flex_wrap()
+        .gap(6.)
+        .px(8.)
+        .py(5.)
+        .radius(8.)
+        .fill(p.warning_soft)
+        .child(label(format!("Queued ({count})"), 12., p.warning))
+        .child(
+            label(first.map_or("", String::as_str), 12., p.text_secondary)
+                .grow(1.)
+                .min_w(0.)
+                .truncate(),
+        )
+        .child(
+            control("queue-send-now-btn", "Interrupt and send queued message", p)
+                .child(label("Interrupt & send", 12., p.accent))
+                .on_press(|s: &mut PrimeDesktopView| {
+                    s.bridge.send(BridgeRequest::AbortAndSendQueued {
+                        active_session_id: s.session.active_session_id.clone(),
+                    });
+                }),
+        )
+        .child(
+            control("queue-clear-btn", "Clear queued messages", p)
+                .child(label("Clear", 12., p.text_secondary))
+                .on_press(|s: &mut PrimeDesktopView| {
+                    s.bridge.send(BridgeRequest::ClearQueue {
+                        active_session_id: s.session.active_session_id.clone(),
+                    });
+                }),
+        )
+}
+
+#[cfg(test)]
+mod tests {
+    use rune::{Env, Key, KeyEvent, Mods, Runtime};
+    use tempfile::TempDir;
+
+    use crate::state::models::parse_model_catalog;
+    use crate::ui::workspace::{LaunchOptions, PrimeDesktopView};
+
+    fn click(app: &mut Runtime<PrimeDesktopView>, key: &str) {
+        let (x, y) = app.find(key).unwrap();
+        app.pointer_down(x, y);
+        app.pointer_up(x, y);
+        app.frame(0.);
+    }
+
+    fn press(app: &mut Runtime<PrimeDesktopView>, key: Key) {
+        let event = KeyEvent {
+            key,
+            mods: Mods::default(),
+        };
+        app.key(event.clone());
+        app.key_up(event);
+        app.frame(0.);
+    }
+
+    #[test]
+    fn reasoning_menu_uses_model_levels_and_supports_direct_keyboard_selection() {
+        let tmp = TempDir::new().unwrap();
+        let mut view = PrimeDesktopView::new(
+            LaunchOptions {
+                initial_cwd: Some(tmp.path().into()),
+                daemon_socket: Some(tmp.path().join("test.sock")),
+                ..LaunchOptions::default()
+            },
+            tmp.path().into(),
+        );
+        view.daemon_connected = true;
+        view.session.active_session_id = "agent".into();
+        view.session.model_provider = Some("example".into());
+        view.session.model_id = Some("sparse".into());
+        view.session.thinking_level = "low".into();
+        view.catalog_models = parse_model_catalog(&serde_json::json!({"models":[{
+            "provider":"example", "id":"sparse", "reasoning":true,
+            "thinkingLevelMap":{"off":null,"minimal":null,"medium":null,"high":null,"max":"maximum"}
+        }]}))
+        .0;
+        let mut app = Runtime::new(
+            view,
+            PrimeDesktopView::view,
+            (950., 720.),
+            Env::new(false, 1.),
+        );
+        // A model that only supports Off has no setting to choose.
+        app.state.catalog_models.push(
+            parse_model_catalog(&serde_json::json!({"models":[
+                {"provider":"example","id":"fixed","reasoning":false}
+            ]}))
+            .0
+            .pop()
+            .unwrap(),
+        );
+        app.state.session.model_id = Some("fixed".into());
+        app.invalidate();
+        app.frame(0.);
+        assert!(app.find("composer-effort-pill").is_none());
+        app.state.session.model_id = Some("sparse".into());
+        app.invalidate();
+        app.frame(0.);
+        click(&mut app, "composer-effort-pill");
+        let levels = app
+            .elements()
+            .into_iter()
+            .filter(|e| {
+                e.key
+                    .as_deref()
+                    .is_some_and(|k| k.starts_with("reasoning-level-"))
+            })
+            .map(|e| (e.key.unwrap(), e.item_selected))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            levels,
+            [
+                ("reasoning-level-low".into(), true),
+                ("reasoning-level-max".into(), false)
+            ]
+        );
+        press(&mut app, Key::Escape);
+        assert!(!app.state.reasoning_picker_open);
+        click(&mut app, "composer-effort-pill");
+        // A click outside dismisses without sending a setting change.
+        app.pointer_down(5., 5.);
+        app.pointer_up(5., 5.);
+        app.frame(0.);
+        assert!(!app.state.reasoning_picker_open);
+        click(&mut app, "composer-effort-pill");
+        // Rune's pointer-opened listbox reveals the current highlight on the first
+        // arrow. The following arrow moves it without committing a new setting.
+        press(&mut app, Key::Down);
+        assert!(
+            app.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("reasoning-level-low") && e.focus_visible)
+        );
+        press(&mut app, Key::Down);
+        assert!(
+            app.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("reasoning-level-max") && e.focused)
+        );
+        press(&mut app, Key::Enter);
+        assert!(!app.state.reasoning_picker_open);
+    }
 }

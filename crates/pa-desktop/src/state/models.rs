@@ -4,6 +4,27 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
+/// Session snapshots and `get_state` may use either a model object or its selector.
+pub(crate) fn session_model(state: &Value) -> (Option<&str>, Option<&str>) {
+    match state.get("model") {
+        Some(Value::String(selector)) if !selector.is_empty() => selector
+            .split_once('/')
+            .map_or((None, Some(selector.as_str())), |(provider, id)| {
+                (Some(provider), Some(id))
+            }),
+        Some(Value::Object(model)) => {
+            let field = |key| {
+                model
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+            };
+            (field("provider"), field("id"))
+        }
+        _ => (None, None),
+    }
+}
+
 /// One selectable model from `get_model_catalog`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogModel {
@@ -27,18 +48,6 @@ impl CatalogModel {
     #[must_use]
     pub fn provider_display(&self) -> &str {
         provider_display_name(&self.provider)
-    }
-
-    /// Wrap within this model's advertised effort levels, including the first selection.
-    pub(crate) fn next_thinking_level(&self, current: &str) -> Option<&str> {
-        let mut levels = self.supported_levels.iter().map(String::as_str);
-        let first = levels.clone().next()?;
-        let next = if levels.any(|level| level == current) {
-            levels.next().unwrap_or(first)
-        } else {
-            first
-        };
-        (next != current).then_some(next)
     }
 
     #[must_use]
@@ -68,12 +77,34 @@ pub fn provider_display_name(provider: &str) -> &str {
         "prime-inference" => "Prime Inference",
         "openai-codex" => "OpenAI Codex",
         "anthropic" => "Anthropic",
-        "google" | "google-gemini-cli" | "google-vertex" => "Google Gemini",
+        "google" | "google-gemini-cli" => "Google Gemini",
+        "google-vertex" => "Google Vertex AI",
         "openai" => "OpenAI",
         "amazon-bedrock" | "bedrock" => "AWS Bedrock",
         "mistral" => "Mistral",
         "azure-openai-responses" | "azure" => "Azure OpenAI",
         "openrouter" => "OpenRouter",
+        "github-copilot" => "GitHub Copilot",
+        "cerebras" => "Cerebras",
+        "cloudflare-ai-gateway" => "Cloudflare AI Gateway",
+        "cloudflare-workers-ai" => "Cloudflare Workers AI",
+        "deepseek" => "DeepSeek",
+        "fireworks" => "Fireworks",
+        "groq" => "Groq",
+        "huggingface" => "Hugging Face",
+        "kimi-coding" => "Kimi For Coding",
+        "minimax" => "MiniMax",
+        "minimax-cn" => "MiniMax (China)",
+        "moonshotai" => "Moonshot AI",
+        "moonshotai-cn" => "Moonshot AI (China)",
+        "opencode" => "OpenCode Zen",
+        "opencode-go" => "OpenCode Go",
+        "vercel-ai-gateway" => "Vercel AI Gateway",
+        "xiaomi" => "Xiaomi MiMo",
+        "xiaomi-token-plan-cn" => "Xiaomi MiMo Token Plan (China)",
+        "xiaomi-token-plan-ams" => "Xiaomi MiMo Token Plan (Amsterdam)",
+        "xiaomi-token-plan-sgp" => "Xiaomi MiMo Token Plan (Singapore)",
+        "zai" => "ZAI",
         "xai" => "xAI",
         other => other,
     }
@@ -197,14 +228,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn cycle_skips_disabled_efforts_and_includes_mapped_max() {
+    fn supported_levels_skip_disabled_efforts_and_include_mapped_max() {
         let (models, _) = parse_model_catalog(&json!({"models":[{
             "provider":"example", "id":"sparse", "reasoning":true,
             "thinkingLevelMap":{"off":null,"minimal":null,"high":null,"medium":null,"max":"maximum"}
         }]}));
         let model = &models[0];
         assert_eq!(model.supported_levels, ["low", "max"]);
-        assert_eq!(model.next_thinking_level("low"), Some("max"));
-        assert_eq!(model.next_thinking_level("max"), Some("low"));
     }
 }

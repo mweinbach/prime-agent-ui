@@ -1,6 +1,6 @@
 # pa-desktop
 
-`prime-agent-ui` is the native GPUI desktop app for Prime Agent. It talks to the `prime-agent` daemon built from the pinned [`harness/`](../../harness) submodule.
+`prime-agent-ui` is the native Rune desktop app for Prime Agent. It talks to the `prime-agent` daemon built from the pinned [`harness/`](../../harness) submodule.
 
 For Windows and Linux builds, see [Download or build](../../README.md#download-or-build). On those platforms the app uses Ctrl in place of the Command key shown in the macOS shortcuts below.
 
@@ -28,6 +28,12 @@ Use the pen beside a folder to compose there. The toolbar pen and `⌘N` compose
 
 Live and saved conversations appear together. A chat under an added folder belongs to its nearest added parent, but always reopens in its original working directory. Saved chats from temporary directories without an active chat, draft, or added project appear under **Temporary chats** in Folder history. Hover over a chat to see its working directory.
 
+## Preview attachments
+
+Use **+** in the composer to choose a file, or drop several files onto the composer. PNG, JPEG, GIF, and WebP images show a thumbnail. UTF-8 text, including source code and Markdown, shows a snippet. Select a card for a larger preview. Its separate remove button takes it out of the draft.
+
+Previews use the contents captured when you attached the files. Sending uses the original image bytes and the full text, even when the preview shows only an excerpt. Each draft can hold up to 16 files totaling 15 MiB. File text and your message together must fit the 1 MiB prompt limit. Images are limited to 16,384 pixels per side and 33,554,432 pixels in total for decoding. Animated images preview their first frame.
+
 ## Subagents
 
 When a chat spawns a subagent, **Subagents** in the chat header opens **Inspector → Agents**. The list belongs to the current chat, not the whole project. Cards show the reported run status, task and result. Progress notes and tool counts appear when the worker reports them. **Inspect live** opens a resident child’s chat; **Parent** returns to its parent. For nested agents, inspect the child and open its own Agents tab.
@@ -39,7 +45,9 @@ You can message a resident child, cancel a running child, or remove a settled ch
 Desktop opens the same data as `prime-agent`: `~/.prime/agent` by default, or `PRIME_AGENT_CODING_AGENT_DIR` when set in its environment. There is no second copy of your chats or credentials.
 
 - **Conversations:** The project sidebar lists conversations directly from the CLI store. Opening one resumes its original file.
-- **Credentials and models:** Open **Settings** (`⌘,`) to see stored API keys and OAuth sign-ins by provider, including custom providers from `models.json`. Key values and tokens aren't displayed. Editing a saved key changes it for both clients. Shell-only environment variables may not reach an app opened from Finder. Launch the binary from that shell to inherit them, or save a key through the CLI.
+- **Connect an inference provider** from **Settings → Connect provider…** or type `/login` in the composer. Prime Inference supports browser sign-in and API keys with the **Inference** permission. Desktop can reuse an eligible Prime CLI sign-in and lets you choose a personal account or team. Anthropic, OpenAI Codex, GitHub Copilot, and xAI support subscription sign-in. Other API-key providers, including custom entries from `models.json`, use a masked key field.
+- **Choose a model** in the model picker. Selecting a model that needs credentials opens its provider’s sign-in flow. Desktop refreshes the catalog and applies your choice in the same chat when the model becomes available.
+- **Manage shared credentials** in Settings. Desktop saves changes to the selected CLI data folder. To use a key set in a shell environment, launch Desktop from that shell.
 - **Custom data folder:** In **Settings → Prime Agent CLI data → Choose folder…**, select the agent directory that contains `auth.json`, `sessions/` or `settings.json`, not a project checkout. Desktop remembers the folder on this Mac and uses a dedicated daemon for it. **Use default** restores the original location. `PRIME_AGENT_SESSION_DIR` still overrides the sessions location when supplied at launch.
 - **Live CLI sessions:** In the default data folder, choose **Attach to CLI daemon** in Settings to join an existing terminal session. Start `prime-agent` in a terminal first. Desktop won't start, stop or replace the CLI daemon. If the CLI already holds a saved chat, join its daemon or close the CLI session before resuming it in Desktop.
 
@@ -53,7 +61,7 @@ Project list telemetry is off unless you explicitly set `telemetry.enabled` to `
 make test
 ```
 
-The composer test uses GPUI's in-memory `TestWindow`. It selects a session, clicks the composer, types a prompt and presses Return. A real daemon in a temporary directory runs the scripted `faux` provider. The test checks the draft, prompt and reply without opening the app, sending OS input, or using provider credentials.
+The composer test uses Rune’s headless `Runtime`. It selects a session, clicks the composer, types a prompt and presses Return. A real daemon in a temporary directory runs the scripted `faux` provider. The test checks the draft, prompt and reply without opening the app, sending OS input, or using provider credentials.
 
 The kernel-backed subagent test requires an already provisioned Prime Agent kernel interpreter. To exercise live spawn, completion, and parent/child navigation without opening a window:
 
@@ -77,8 +85,8 @@ PA_E2E_KERNEL_PYTHON="$HOME/.prime/agent/kernel-venv/bin/python" nice -n 10 carg
 | `⌘N` | New chat in the browsed project, or the current conversation’s project |
 | `⇧⌘O` | Add a project folder |
 | `⌘K` | Quick Switcher & command palette |
-| `⌘M` | Searchable Model Picker (Prime Inference, OpenAI Codex, Google Gemini, Anthropic, OpenAI) |
-| `⇧⌘E` | Cycle thinking effort (`off` -> `minimal` -> `low` -> `medium` -> `high` -> `xhigh`) |
+| `⌘M` | Find a model by name, ID, or provider |
+| `⇧⌘E` | Choose a reasoning level supported by the active model |
 | `⌘O` | Cycle transcript detail (`Overview` -> `Details` -> `All`) |
 | `⌘B` | Toggle the project sidebar |
 | `⌘I` | Toggle right Agentic Harness Studio drawer |
@@ -92,7 +100,7 @@ PA_E2E_KERNEL_PYTHON="$HOME/.prime/agent/kernel-venv/bin/python" nice -n 10 carg
 
 ## Scope
 
-- Native Metal-accelerated desktop UI built on Zed's `gpui` (`0.2.2`).
+- Native GPU-rendered desktop UI built on a pinned revision of [Rune](https://github.com/anomalyco/rune).
 - Non-blocking async JSONL daemon bridge (`bridge/`) over `pa-types` wire frames on a 2-thread Tokio worker.
 - Dual daemon target support: dedicated `DesktopHarness` supervisor (`desktop-daemon.sock`) and `SharedCli` (`daemon.sock`).
 - Continual Harness Studio (`state/harness_store.rs`, `ui/inspector.rs`) backed by `pa-core::refinement` (`<agent_dir>/harness` and `<agent_dir>/session-artifacts/<id>/harness`).
