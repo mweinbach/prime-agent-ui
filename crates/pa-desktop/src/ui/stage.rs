@@ -289,7 +289,10 @@ impl PrimeDesktopView {
             .min_w(0.)
             .wrap();
         let mut starters = row().min_h(32.).gap(8.).flex_wrap();
-        if self.composer_input.text.is_empty() && self.staged_images.is_empty() {
+        if self.composer_input.text.is_empty()
+            && self.staged_attachments.is_empty()
+            && !self.attachments_loading()
+        {
             for (key, icon, title, prompt) in [
                 (
                     "explore-project",

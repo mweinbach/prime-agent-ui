@@ -24,9 +24,15 @@ Use the folder-plus button (`⇧⌘O`) to add a project. It opens that folder’
 
 Click the chevron to preview up to five chats, or click the folder name to browse all its loaded chats. Browsing a project filters the sidebar without switching the conversation or moving its draft. **All projects** takes you back. Click the folder in the chat header to reveal the open conversation’s project. Selecting a project in the Quick Switcher also opens this view. Search includes chats outside the preview and opens matching history folders; within a project it searches just that folder’s group. **Load older chats** fetches the next page from the CLI store.
 
-Use the pen beside a folder to compose there. The toolbar pen and `⌘N` compose in the project you’re browsing, or in the current conversation’s project when no project is in focus. Unsent drafts stay in memory and appear under their original folders. Sending a message or requesting a model for a new chat creates a session. Use the composer’s image button to choose one file, or drop several image files onto the composer to attach them together.
+Use the pen beside a folder to compose there. The toolbar pen and `⌘N` compose in the project you’re browsing, or in the current conversation’s project when no project is in focus. Unsent drafts stay in memory and appear under their original folders. Sending a message or requesting a model for a new chat creates a session.
 
 Live and saved conversations appear together. A chat under an added folder belongs to its nearest added parent, but always reopens in its original working directory. Saved chats from temporary directories without an active chat, draft, or added project appear under **Temporary chats** in Folder history. Hover over a chat to see its working directory.
+
+## Preview attachments
+
+Use **+** in the composer to choose a file, or drop several files onto the composer. PNG, JPEG, GIF, and WebP images show a thumbnail. UTF-8 text, including source code and Markdown, shows a snippet. Select a card for a larger preview. Its separate remove button takes it out of the draft.
+
+Previews use the contents captured when you attached the files. Sending uses the original image bytes and the full text, even when the preview shows only an excerpt. Each draft can hold up to 16 files totaling 15 MiB. File text and your message together must fit the 1 MiB prompt limit. Images are limited to 16,384 pixels per side and 33,554,432 pixels in total for decoding. Animated images preview their first frame.
 
 ## Subagents
 

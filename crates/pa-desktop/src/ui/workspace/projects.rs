@@ -21,7 +21,7 @@ impl PrimeDesktopView {
                 .chain(
                     (self.session.active_session_id.is_empty()
                         && (!self.composer_input.text.is_empty()
-                            || !self.staged_images.is_empty()))
+                            || !self.staged_attachments.is_empty()))
                     .then_some(self.working_cwd.as_str()),
                 ),
             query,
@@ -147,11 +147,15 @@ impl PrimeDesktopView {
     }
 
     pub(super) fn stash_draft(&mut self) {
+        self.close_attachment_preview();
         let text = self.composer_input.text.as_str();
-        if text.is_empty() && self.staged_images.is_empty() {
+        if text.is_empty() && self.staged_attachments.is_empty() && !self.attachments_loading() {
             return;
         }
-        let draft: Draft = (text.to_owned(), std::mem::take(&mut self.staged_images));
+        let draft: Draft = (
+            text.to_owned(),
+            std::mem::take(&mut self.staged_attachments),
+        );
         self.drafts
             .entry(self.draft_key())
             .or_default()
@@ -162,7 +166,7 @@ impl PrimeDesktopView {
     pub(super) fn restore_draft(&mut self) {
         let key = self.draft_key();
         if self.composer_input.text.is_empty()
-            && self.staged_images.is_empty()
+            && self.staged_attachments.is_empty()
             && let Some(drafts) = self.drafts.get_mut(&key)
             && let Some((text, images)) = drafts.pop_front()
         {
@@ -170,7 +174,7 @@ impl PrimeDesktopView {
                 self.drafts.remove(&key);
             }
             self.composer_input.replace_text(text);
-            self.staged_images = images;
+            self.staged_attachments = images;
         }
     }
 }

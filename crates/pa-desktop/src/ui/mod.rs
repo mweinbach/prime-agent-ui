@@ -1,5 +1,6 @@
 //! Rune view components for the Prime Agent desktop harness.
 
+pub(super) mod attachment_preview;
 pub mod composer;
 pub mod inspector;
 pub mod markdown;

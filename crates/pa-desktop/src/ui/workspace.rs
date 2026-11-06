@@ -1,5 +1,8 @@
 //! Shared desktop controller. Rune events and daemon updates meet on the UI thread.
 
+#[cfg(test)]
+mod attachment_preview_tests;
+mod attachments;
 mod background;
 mod cli_data;
 mod dialogs;
@@ -11,10 +14,8 @@ mod model_picker;
 mod projects;
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
-use base64::Engine as _;
 use pa_core::refinement::{HarnessScope, RefinementKind};
 use rune::TextEdit;
 
@@ -27,7 +28,7 @@ use crate::state::models::{CatalogModel, parse_model_catalog};
 use crate::state::transcript::AttachedSessionState;
 use crate::state::{
     ActiveModal, ActiveSessionRow, DraftKey, McpRow, SavedSessionRow, ScheduleRow,
-    SessionTelemetry, ShellProcessRow, StagedImage, subagents::Subagents,
+    SessionTelemetry, ShellProcessRow, StagedAttachment, subagents::Subagents,
 };
 use crate::theme::{DaemonTarget, DesktopPreferences, InspectorTab, ThemeMode};
 
@@ -42,12 +43,9 @@ pub struct LaunchOptions {
     pub initial_modal: Option<ActiveModal>,
 }
 
-// Bound in-memory drafts and base64 encoding on the desktop; providers can impose lower limits.
-const MAX_PROMPT_BYTES: usize = 1024 * 1024;
-const MAX_ATTACHMENT_BYTES: usize = 15 * 1024 * 1024;
-const MAX_ATTACHMENTS: usize = 16;
+use crate::state::attachments::{MAX_PROMPT_BYTES, prompt_size};
 
-type Draft = (String, Vec<StagedImage>);
+type Draft = (String, Vec<StagedAttachment>);
 
 #[derive(Default)]
 enum SessionSelection {
@@ -136,7 +134,12 @@ pub struct PrimeDesktopView {
     pub(super) slash_selected_idx: usize,
     pub renaming_session: bool,
     pub agent_mail_target: Option<String>,
-    pub staged_images: Vec<StagedImage>,
+    pub staged_attachments: Vec<StagedAttachment>,
+    pending_attachments: HashSet<DraftKey>,
+    attachment_preview_id: Option<uuid::Uuid>,
+    image_decode_in_progress: bool,
+    expanded_attachment: Option<(uuid::Uuid, rune::Pixels)>,
+    attachment_preview_error: Option<String>,
 
     pub(super) follow_tail: bool,
     scroll_to_tail: bool,
@@ -267,7 +270,12 @@ impl PrimeDesktopView {
             slash_selected_idx: 0,
             renaming_session: false,
             agent_mail_target: None,
-            staged_images: Vec::new(),
+            staged_attachments: Vec::new(),
+            pending_attachments: HashSet::new(),
+            attachment_preview_id: None,
+            image_decode_in_progress: false,
+            expanded_attachment: None,
+            attachment_preview_error: None,
             follow_tail: true,
             scroll_to_tail: false,
             composer_input: TextEdit::new(""),
@@ -331,7 +339,8 @@ impl PrimeDesktopView {
                 let candidate = (std::mem::take(&mut self.auto_attach)
                     && self.session.active_session_id.is_empty()
                     && self.composer_input.text.is_empty()
-                    && self.staged_images.is_empty())
+                    && self.staged_attachments.is_empty()
+                    && !self.attachments_loading())
                 .then(|| {
                     rows.iter()
                         .find(|r| r.rlm_depth == 0 && r.cwd == self.working_cwd)
@@ -406,14 +415,16 @@ impl PrimeDesktopView {
             BridgeEvent::PromptRejected {
                 draft,
                 message,
-                images,
+                attachments,
                 reason,
             } => {
                 self.drafts
                     .entry(draft)
                     .or_default()
-                    .push_back((message, images));
-                self.restore_draft();
+                    .push_back((message, attachments));
+                if !self.attachments_loading() {
+                    self.restore_draft();
+                }
                 self.toast = Some((reason, true));
             }
             BridgeEvent::SessionAttached {
@@ -443,8 +454,8 @@ impl PrimeDesktopView {
                     self.bridge
                         .send(BridgeRequest::RefreshInspector { active_session_id });
                     self.reload_local_stores();
-                    self.restore_draft();
                 }
+                self.restore_draft();
                 self.follow_transcript();
             }
             BridgeEvent::SnapshotChunkBegin {
@@ -678,6 +689,7 @@ impl PrimeDesktopView {
     }
 
     fn reset_session(&mut self) {
+        self.close_attachment_preview();
         self.follow_tail = true;
         self.scroll_to_tail = false;
         self.session = AttachedSessionState::default();
@@ -758,8 +770,11 @@ impl PrimeDesktopView {
     }
 
     pub fn submit_composer(&mut self) {
+        if self.selected_attachment_preview().is_some() || self.attachments_loading() {
+            return;
+        }
         let trimmed = self.composer_input.text.trim().to_owned();
-        if trimmed.is_empty() && self.staged_images.is_empty() {
+        if trimmed.is_empty() && self.staged_attachments.is_empty() {
             return;
         }
         let btw = trimmed == "/btw"
@@ -776,9 +791,11 @@ impl PrimeDesktopView {
         if !local && trimmed != "/new" && !self.ready_for_request() {
             return;
         }
-        let error = if trimmed.len() > MAX_PROMPT_BYTES {
-            Some("Prompt exceeds 1 MiB. Shorten it before sending.")
-        } else if !self.staged_images.is_empty()
+        let error = if prompt_size(&trimmed, &self.staged_attachments) > MAX_PROMPT_BYTES {
+            Some(
+                "The message and attached text exceed 1 MiB. Shorten the message or remove a file.",
+            )
+        } else if !self.staged_attachments.is_empty()
             && (local || session_command || trimmed == "/new" || self.session.is_streaming)
         {
             Some("Remove attachments to send a command or steer a running turn.")
@@ -798,7 +815,7 @@ impl PrimeDesktopView {
         self.follow_transcript();
         self.record_history(&trimmed);
         self.composer_input.replace_text("");
-        let images = std::mem::take(&mut self.staged_images);
+        let attachments = std::mem::take(&mut self.staged_attachments);
 
         // Builtin client slash shortcuts
         if btw {
@@ -867,7 +884,7 @@ impl PrimeDesktopView {
                 cwd: self.working_cwd.clone(),
                 name: None,
                 initial_prompt: Some(trimmed),
-                images,
+                attachments,
             });
         } else if self.session.is_streaming {
             self.bridge.send(BridgeRequest::SteerSession {
@@ -878,7 +895,7 @@ impl PrimeDesktopView {
             self.bridge.send(BridgeRequest::SendPrompt {
                 active_session_id: self.session.active_session_id.clone(),
                 message: trimmed,
-                images,
+                attachments,
             });
         }
     }
@@ -900,10 +917,13 @@ impl PrimeDesktopView {
     }
 
     fn submit_queued(&mut self, request: impl FnOnce(String, String) -> BridgeRequest) {
+        if self.selected_attachment_preview().is_some() || self.attachments_loading() {
+            return;
+        }
         if !self.ready_for_request() || self.session.active_session_id.is_empty() {
             return;
         }
-        if !self.staged_images.is_empty() {
+        if !self.staged_attachments.is_empty() {
             self.toast = Some((
                 "Remove attachments before steering or queuing a follow-up.".to_owned(),
                 true,
@@ -1237,46 +1257,6 @@ impl PrimeDesktopView {
     }
 }
 
-fn read_image_file(path: &Path, remaining: usize) -> anyhow::Result<StagedImage> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase();
-    let mime = match ext.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "gif" => "image/gif",
-        _ => anyhow::bail!("Choose a PNG, JPEG, WebP or GIF image."),
-    };
-    let file = std::fs::File::open(path)?;
-    let meta = file.metadata()?;
-    anyhow::ensure!(meta.is_file(), "Choose a regular image file.");
-    anyhow::ensure!(
-        meta.len() <= remaining as u64,
-        "Images exceed the 15 MiB attachment limit."
-    );
-    let mut bytes = Vec::with_capacity(meta.len() as usize);
-    file.take(remaining as u64 + 1).read_to_end(&mut bytes)?;
-    anyhow::ensure!(
-        bytes.len() <= remaining,
-        "Images exceed the 15 MiB attachment limit."
-    );
-    let filename = path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("image")
-        .to_string();
-    let base64_data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(StagedImage {
-        filename,
-        mime_type: mime.to_string(),
-        base64_data,
-        byte_len: bytes.len(),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1288,14 +1268,5 @@ mod tests {
         assert!(!pending.accepts_snapshot("old", "old"));
         assert!(pending.accepts_snapshot("", "next"));
         assert!(!SessionSelection::Idle.accepts_snapshot("next", "old"));
-    }
-
-    #[test]
-    fn image_picker_respects_remaining_bytes_before_encoding() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("photo.png");
-        std::fs::write(&path, b"test").unwrap();
-        assert!(read_image_file(&path, 3).is_err());
-        assert_eq!(read_image_file(&path, 4).unwrap().base64_data, "dGVzdA==");
     }
 }

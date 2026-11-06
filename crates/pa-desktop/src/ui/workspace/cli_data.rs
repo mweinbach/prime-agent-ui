@@ -8,7 +8,8 @@ impl PrimeDesktopView {
     fn has_unsaved_edits(&self) -> bool {
         self.auth_write_pending
             || !self.composer_input.text.is_empty()
-            || !self.staged_images.is_empty()
+            || !self.staged_attachments.is_empty()
+            || !self.pending_attachments.is_empty()
             || self.drafts.values().any(|drafts| !drafts.is_empty())
             || !self.api_key_input.text.is_empty()
             || self.harness_editor_open

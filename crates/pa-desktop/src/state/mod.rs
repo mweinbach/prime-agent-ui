@@ -1,5 +1,10 @@
 //! Reactive application state models: sessions, subagent roster, runtime drawers, and modals.
 
+pub(crate) mod attachments;
+pub(crate) mod image_preview;
+pub use attachments::{AttachmentPreview, StagedAttachment};
+pub use image_preview::ImagePreview;
+
 pub mod harness_store;
 pub mod models;
 pub(crate) mod projects;
@@ -424,15 +429,6 @@ impl SessionTelemetry {
         }
         self.update_from_state(stats);
     }
-}
-
-/// Image staged in the composer for the next `Prompt`.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StagedImage {
-    pub filename: String,
-    pub mime_type: String,
-    pub base64_data: String,
-    pub byte_len: usize,
 }
 
 #[must_use]

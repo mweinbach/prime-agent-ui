@@ -189,6 +189,10 @@ impl PrimeDesktopView {
 
     pub fn dismiss_overlay(&mut self) -> bool {
         let width = self.viewport_width;
+        if self.selected_attachment_preview().is_some() {
+            self.close_attachment_preview();
+            return true;
+        }
         if self.confirm.take().is_some() {
             return true;
         }

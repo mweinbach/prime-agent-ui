@@ -9,7 +9,7 @@ use super::text_input::{LINE_HEIGHT, dismiss, field};
 use super::workspace::PrimeDesktopView;
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
-use crate::state::{ActiveModal, truncate_chars};
+use crate::state::ActiveModal;
 use crate::theme::Palette;
 
 const SLASH_SUGGESTIONS: [(&str, &str); 8] = [
@@ -54,6 +54,9 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktop
     let shell = draft.trim_start().starts_with('!');
     let mut section = col()
         .key("composer")
+        // A completed file load inserts a row above the editor. Its hit targets
+        // and the editor must move together in the same frame.
+        .instant_changes()
         .w_full()
         .gap(8.)
         .on_drop_files(|s: &mut PrimeDesktopView, files, _| s.attach_files(files.to_vec()));
@@ -107,27 +110,8 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktop
         .border(1., border)
         .shadow(3., 10., rune::Color::BLACK.alpha(0.09));
 
-    if !view.staged_images.is_empty() {
-        let mut attachments = row().flex_wrap().gap(6.);
-        for (i, image) in view.staged_images.iter().enumerate() {
-            attachments = attachments.child(
-                control(
-                    &format!("rm-img-{i}"),
-                    &format!("Remove {}", image.filename),
-                    p,
-                )
-                .fill(p.info_soft)
-                .child(Icon::Image.render(13., p.info))
-                .child(label(truncate_chars(&image.filename, 28), 12., p.info))
-                .child(Icon::Close.render(11., p.info))
-                .on_press(move |s: &mut PrimeDesktopView| {
-                    if i < s.staged_images.len() {
-                        s.staged_images.remove(i);
-                    }
-                }),
-            );
-        }
-        card = card.child(attachments);
+    if !view.staged_attachments.is_empty() || view.attachments_loading() {
+        card = card.child(super::attachment_preview::staged(view, p));
     }
     // Up/Down move through wrapped text normally. Only the outermost visual lines
     // recall history, including the ends of a long scrolled draft.
@@ -178,9 +162,14 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktop
         .gap(3.)
         .flex_wrap()
         .child(
-            icon_control("composer-attach-img-btn", "Attach images", Icon::Plus, p)
-                .size(30., 30.)
-                .on_press(PrimeDesktopView::prompt_attach_images),
+            icon_control(
+                "composer-attach-img-btn",
+                "Attach files or images",
+                Icon::Plus,
+                p,
+            )
+            .size(30., 30.)
+            .on_press(PrimeDesktopView::prompt_attach_files),
         )
         .child(
             control("composer-model-pill", "Select model", p)
@@ -254,7 +243,7 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktop
                     }),
             );
     } else {
-        let enabled = !draft.trim().is_empty() || !view.staged_images.is_empty();
+        let enabled = !draft.trim().is_empty() || !view.staged_attachments.is_empty();
         actions = actions.child(
             control("composer-send-btn", "Send message", p)
                 .size(34., 34.)

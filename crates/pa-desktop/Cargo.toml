@@ -17,6 +17,7 @@ pa-telemetry = { path = "../../harness/crates/pa-telemetry" }
 rune = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda", default-features = false, features = ["accessibility", "metal-backend", "native-file-dialog"] }
 anyhow = { workspace = true }
 futures = { workspace = true }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

@@ -1,15 +1,12 @@
 //! Native file dialogs. Read and encode attachments off the render thread.
 use rune::{FileDialogOptions, FileDialogResult, Tx};
 
-use super::{
-    BridgeRequest, DraftKey, MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS, PathBuf, PrimeDesktopView,
-    read_image_file,
-};
+use super::{BridgeRequest, DraftKey, PathBuf, PrimeDesktopView};
 
 pub(super) enum Dialog {
     AddProject,
     CliFolder,
-    AttachImage(DraftKey),
+    AttachFiles(DraftKey),
     Export(String),
 }
 
@@ -27,8 +24,8 @@ impl PrimeDesktopView {
         self.request_dialog(Dialog::CliFolder);
     }
 
-    pub fn prompt_attach_images(&mut self) {
-        self.request_dialog(Dialog::AttachImage(self.draft_key()));
+    pub fn prompt_attach_files(&mut self) {
+        self.request_dialog(Dialog::AttachFiles(self.draft_key()));
     }
 
     pub fn prompt_export_html(&mut self) {
@@ -60,9 +57,8 @@ impl PrimeDesktopView {
                     }
                 });
             }
-            Dialog::AttachImage(target) => {
-                options.title = "Attach image".into();
-                let options = options.filter("Images", &["png", "jpg", "jpeg", "webp", "gif"]);
+            Dialog::AttachFiles(target) => {
+                options.title = "Attach files".into();
                 tx.open_file(options, move |s: &mut Self, result, _| {
                     if let Some(path) = s.dialog_path(result)
                         && target == s.draft_key()
@@ -94,51 +90,5 @@ impl PrimeDesktopView {
                 None
             }
         }
-    }
-
-    pub(in crate::ui) fn attach_files(&mut self, paths: Vec<PathBuf>) {
-        if paths.is_empty() {
-            return;
-        }
-        if paths.len() > MAX_ATTACHMENTS.saturating_sub(self.staged_images.len()) {
-            self.toast = Some((
-                format!("Attach up to {MAX_ATTACHMENTS} images per prompt."),
-                true,
-            ));
-            return;
-        }
-        let target = self.draft_key();
-        let bytes = self.staged_images.iter().map(|image| image.byte_len).sum();
-        let mut remaining = MAX_ATTACHMENT_BYTES.saturating_sub(bytes);
-        self.background.run(&self.bridge, move || {
-            let loaded = paths
-                .iter()
-                .map(|path| {
-                    let image = read_image_file(path, remaining)?;
-                    remaining -= image.byte_len;
-                    Ok(image)
-                })
-                .collect::<anyhow::Result<Vec<_>>>();
-            move |view: &mut Self| {
-                if target != view.draft_key() {
-                    return;
-                }
-                let bytes: usize = view.staged_images.iter().map(|i| i.byte_len).sum();
-                match loaded {
-                    Ok(images)
-                        if view.staged_images.len() + images.len() <= MAX_ATTACHMENTS
-                            && images.iter().map(|i| i.byte_len).sum::<usize>()
-                                <= MAX_ATTACHMENT_BYTES.saturating_sub(bytes) =>
-                    {
-                        view.staged_images.extend(images);
-                    }
-                    Ok(_) => {
-                        view.toast =
-                            Some(("Attachments exceed the limit for one prompt.".into(), true));
-                    }
-                    Err(err) => view.toast = Some((err.to_string(), true)),
-                }
-            }
-        });
     }
 }

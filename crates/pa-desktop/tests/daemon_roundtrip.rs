@@ -131,6 +131,50 @@ impl IsolatedDaemon {
         desktop.frame(0.0);
         desktop
     }
+
+    fn open_scripted_chat(&self, reply: &str) -> Runtime<PrimeDesktopView> {
+        let script = self.root.path().join("faux.json");
+        std::fs::write(
+            &script,
+            serde_json::json!({"engine": "faux", "responses": [reply]}).to_string(),
+        )
+        .expect("write faux provider script");
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        // Only test setup uses the raw create command. The desktop bridge does not
+        // expose the daemon's config.script verification seam to users.
+        let link = pa_daemon::supervisor_link::SupervisorLink::new(self.socket.clone());
+        let created = rt
+            .block_on(link.request_success(
+                serde_json::json!({
+                    "type": "create",
+                    "telemetryDisabled": true,
+                    "lifecycle": "resident",
+                    "config": { "cwd": self.work_dir, "script": script }
+                }),
+                Duration::from_secs(25),
+            ))
+            .expect("create faux session");
+        let sid = created["activeSessionId"]
+            .as_str()
+            .expect("active session id");
+        let mut desktop = self.open_workspace(&self.agent_dir);
+        wait_for_workspace(&mut desktop, |workspace| {
+            workspace
+                .active_sessions
+                .iter()
+                .any(|row| row.active_session_id == sid)
+        });
+        click(&mut desktop, &format!("live-session-{sid}"));
+        wait_for_workspace(&mut desktop, |workspace| {
+            workspace.session.active_session_id == sid
+        });
+        desktop
+    }
 }
 
 fn wait_for_workspace(
@@ -272,7 +316,7 @@ fn desktop_bridge_supervises_session_bash_catalog_and_harness_store() {
                         cwd: work_dir.to_string_lossy().to_string(),
                         name: Some("Desktop Integration Session".to_string()),
                         initial_prompt: None,
-                        images: Vec::new(),
+                        attachments: Vec::new(),
                     });
                 }
                 BridgeEvent::SessionAttached {
@@ -390,46 +434,7 @@ fn return_in_the_composer_sends_the_prompt_and_displays_the_reply() {
     const PROMPT: &str = "check notes";
     const REPLY: &str = "The desktop bridge sent it.";
     let daemon = IsolatedDaemon::spawn();
-    let script = daemon.root.path().join("faux.json");
-    std::fs::write(
-        &script,
-        serde_json::json!({"engine": "faux", "responses": [REPLY]}).to_string(),
-    )
-    .expect("write faux provider script");
-
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .build()
-        .unwrap();
-    // Only test setup uses the raw create command. The desktop bridge does not
-    // expose the daemon's config.script verification seam to users.
-    let link = pa_daemon::supervisor_link::SupervisorLink::new(daemon.socket.clone());
-    let created = rt
-        .block_on(link.request_success(
-            serde_json::json!({
-                "type": "create",
-                "telemetryDisabled": true,
-                "lifecycle": "resident",
-                "config": { "cwd": daemon.work_dir, "script": script }
-            }),
-            Duration::from_secs(25),
-        ))
-        .expect("create faux session");
-    let sid = created["activeSessionId"]
-        .as_str()
-        .expect("active session id");
-    let mut desktop = daemon.open_workspace(&daemon.agent_dir);
-    wait_for_workspace(&mut desktop, |workspace| {
-        workspace
-            .active_sessions
-            .iter()
-            .any(|row| row.active_session_id == sid)
-    });
-    click(&mut desktop, &format!("live-session-{sid}"));
-    wait_for_workspace(&mut desktop, |workspace| {
-        workspace.session.active_session_id == sid
-    });
+    let mut desktop = daemon.open_scripted_chat(REPLY);
     {
         let workspace = &desktop.state;
         assert_eq!(workspace.session.model_provider.as_deref(), Some("faux"));
@@ -462,6 +467,97 @@ fn return_in_the_composer_sends_the_prompt_and_displays_the_reply() {
             "expected the typed prompt and settled reply, got {messages:?}"
         );
     }
+}
+
+#[test]
+fn previewed_attachments_send_the_same_file_contents_and_original_image() {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    use pa_daemon::session_store::SessionFile;
+
+    const ORIGINAL_TEXT: &str = "Water the seedlings at 8 a.m. 🌱";
+    // A 3 × 2 RGB image. The daemon should receive the exact PNG, independently of its resized UI preview.
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAMAAAACCAIAAAASFvFNAAAAFUlEQVR4nGPYmOqQ21Z0eFkRA5wFAFooCS16Lx7fAAAAAElFTkSuQmCC";
+    let daemon = IsolatedDaemon::spawn();
+    let mut desktop = daemon.open_scripted_chat("Attachments received.");
+    let document = daemon.work_dir.join("garden-notes.md");
+    let photo = daemon.work_dir.join("garden.png");
+    std::fs::write(&document, ORIGINAL_TEXT).unwrap();
+    std::fs::write(&photo, STANDARD.decode(PNG).unwrap()).unwrap();
+    desktop.drop_files(
+        vec![document.clone(), photo.clone()],
+        desktop.find("composer-input"),
+    );
+    wait_for_workspace(&mut desktop, |w| w.staged_attachments.len() == 2);
+
+    // Previews and delivery use the staged copy, even if the originals change or disappear.
+    std::fs::write(&document, "Changed on disk").unwrap();
+    std::fs::remove_file(&photo).unwrap();
+    let document_card = desktop
+        .state
+        .staged_attachments
+        .iter()
+        .find(|a| a.filename == "garden-notes.md")
+        .unwrap();
+    let document_key = format!("preview-attachment-{}", document_card.id);
+    click(&mut desktop, &document_key);
+    assert!(
+        desktop.find("attachment-preview-text").is_some(),
+        "text preview did not open"
+    );
+    assert!(
+        desktop
+            .elements()
+            .iter()
+            .any(|e| e.text.as_ref().is_some_and(|t| t.contains(ORIGINAL_TEXT)))
+    );
+    click(&mut desktop, "attachment-preview-close");
+
+    let image_card = desktop
+        .state
+        .staged_attachments
+        .iter()
+        .find(|a| a.filename == "garden.png")
+        .unwrap();
+    let image_key = format!("preview-attachment-{}", image_card.id);
+    click(&mut desktop, &image_key);
+    assert!(desktop.find("attachment-preview-image").is_some());
+    click(&mut desktop, "attachment-preview-close");
+    click(&mut desktop, "composer-input");
+    // The files themselves are a valid prompt.
+    press(&mut desktop, Key::Enter);
+    wait_for_workspace(&mut desktop, |w| {
+        matches!(
+            w.session.entries.last(),
+            Some(TranscriptEntry::Assistant {
+                streaming: false,
+                error: None,
+                ..
+            })
+        )
+    });
+    assert!(desktop.state.staged_attachments.is_empty());
+
+    let session = SessionFile::open(Path::new(
+        desktop.state.session.session_file.as_ref().unwrap(),
+    ))
+    .unwrap();
+    let messages = session.messages();
+    let submitted = messages
+        .iter()
+        .find(|m| m["role"] == "user")
+        .expect("persisted user message");
+    let parts = submitted["content"].as_array().unwrap();
+    let text = parts.iter().find(|part| part["type"] == "text").unwrap()["text"]
+        .as_str()
+        .unwrap();
+    assert!(text.contains("garden-notes.md") && text.contains(ORIGINAL_TEXT));
+    assert!(!text.contains("Changed on disk") && !text.contains(daemon.work_dir.to_str().unwrap()));
+    let image = parts
+        .iter()
+        .find(|part| part["type"] == "image")
+        .expect("persisted image part");
+    assert_eq!(image["mimeType"], "image/png");
+    assert_eq!(image["data"], PNG);
 }
 
 #[test]

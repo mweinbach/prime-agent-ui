@@ -92,7 +92,9 @@ impl PrimeDesktopView {
         if let Some(picker) = self.reasoning_picker(p) {
             root = root.child(picker);
         }
-        if let Some(modal) = self.active_modal(cx) {
+        if let Some(preview) = self.attachment_preview(cx, p) {
+            root = root.child(preview);
+        } else if let Some(modal) = self.active_modal(cx) {
             root = root.child(modal);
         } else if let Some(toast) = self.notification(p) {
             root = root.child(toast.pin(None, None, Some(22.0), Some(22.0)));

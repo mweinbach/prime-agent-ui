@@ -34,7 +34,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::state::{
     ActiveSessionRow, McpRow, RlmChildRow, SavedSessionRow, ScheduleRow, ShellProcessRow,
-    StagedImage,
+    StagedAttachment,
 };
 use crate::theme::DaemonTarget;
 
@@ -59,7 +59,7 @@ pub enum BridgeRequest {
         cwd: String,
         name: Option<String>,
         initial_prompt: Option<String>,
-        images: Vec<StagedImage>,
+        attachments: Vec<StagedAttachment>,
     },
     OpenSavedSession {
         session_path: String,
@@ -85,7 +85,7 @@ pub enum BridgeRequest {
     SendPrompt {
         active_session_id: String,
         message: String,
-        images: Vec<StagedImage>,
+        attachments: Vec<StagedAttachment>,
     },
     SteerSession {
         active_session_id: String,
@@ -244,7 +244,7 @@ pub enum BridgeEvent {
     PromptRejected {
         draft: crate::state::DraftKey,
         message: String,
-        images: Vec<StagedImage>,
+        attachments: Vec<StagedAttachment>,
         reason: String,
     },
     SessionAttached {
@@ -543,6 +543,17 @@ struct RawClient {
     inbound_frames: Arc<Mutex<Option<mpsc::UnboundedReceiver<Value>>>>,
 }
 
+#[derive(Debug)]
+struct WriterClosed;
+
+impl std::fmt::Display for WriterClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Daemon disconnected before the request could be sent.")
+    }
+}
+
+impl std::error::Error for WriterClosed {}
+
 impl RawClient {
     async fn connect(socket_path: &Path) -> Result<Self> {
         let stream = tokio::time::timeout(
@@ -659,7 +670,7 @@ impl RawClient {
         self.pending.insert(id.clone(), tx);
         if self.writer.send(encoded).is_err() {
             self.pending.fail_all("daemon writer closed");
-            return Err(anyhow!("daemon socket disconnected"));
+            return Err(WriterClosed.into());
         }
         tokio::time::timeout(timeout, rx)
             .await
@@ -779,9 +790,12 @@ async fn run_worker_loop(
                 let client = active_client.clone();
                 let tx = evt_tx.clone();
                 tasks.spawn(async move {
-                    let outcome = match client {
-                        Some(client) => dispatch_request(&client, other, &tx).await,
-                        None => Err(anyhow!("Not connected. Refresh to reconnect.")),
+                    let outcome = if let Some(client) = client {
+                        dispatch_request(&client, other, &tx).await
+                    } else {
+                        let reason = "Not connected. Refresh to reconnect.";
+                        restore_undispatched_prompt(other, &tx, reason);
+                        Err(anyhow!(reason))
                     };
                     if let Err(error) = outcome {
                         let message = format!("{error:#}");
@@ -820,29 +834,50 @@ fn check_daemon_ok(resp: DaemonResponse) -> Result<Value> {
     }
 }
 
-fn wire_images(images: &[StagedImage]) -> Option<Value> {
-    if images.is_empty() {
-        return None;
-    }
-    Some(Value::Array(
-        images
-            .iter()
-            .map(|img| {
-                json!({
-                    "type": "image",
-                    "mimeType": img.mime_type,
-                    "data": img.base64_data,
-                })
-            })
-            .collect(),
-    ))
+fn restore_undispatched_prompt(
+    request: BridgeRequest,
+    events: &futures_mpsc::UnboundedSender<BridgeEvent>,
+    reason: &str,
+) {
+    let (draft, message, attachments) = match request {
+        BridgeRequest::CreateSession {
+            cwd,
+            initial_prompt: Some(message),
+            attachments,
+            ..
+        } => (crate::state::DraftKey::Project(cwd), message, attachments),
+        BridgeRequest::SendPrompt {
+            active_session_id,
+            message,
+            attachments,
+        } => (
+            crate::state::DraftKey::Session(active_session_id),
+            message,
+            attachments,
+        ),
+        _ => return,
+    };
+    let _ = events.unbounded_send(BridgeEvent::PromptRejected {
+        draft,
+        message,
+        attachments,
+        reason: reason.to_owned(),
+    });
+}
+
+fn wire_images(attachments: &[StagedAttachment]) -> Option<Value> {
+    let images: Vec<_> = attachments
+        .iter()
+        .filter_map(StagedAttachment::wire_image)
+        .collect();
+    (!images.is_empty()).then_some(Value::Array(images))
 }
 
 async fn submit_prompt(
     client: &RawClient,
     session: String,
     message: String,
-    images: Vec<StagedImage>,
+    attachments: Vec<StagedAttachment>,
     events: &futures_mpsc::UnboundedSender<BridgeEvent>,
 ) -> Result<()> {
     let response = client
@@ -850,10 +885,10 @@ async fn submit_prompt(
             DaemonCommand::Prompt {
                 id: None,
                 active_session_id: session.clone(),
-                message: message.clone(),
+                message: crate::state::attachments::wire_text(&message, &attachments).into_owned(),
                 input: PromptInput {
                     content: None,
-                    images: wire_images(&images),
+                    images: wire_images(&attachments),
                     streaming_behavior: None,
                     queue_if_busy: Some(true),
                     expand_prompt_templates: Some(true),
@@ -869,7 +904,25 @@ async fn submit_prompt(
             },
             Duration::from_secs(20),
         )
-        .await?;
+        .await;
+    let response = match response {
+        Ok(response) => response,
+        Err(error) if error.is::<WriterClosed>() => {
+            let _ = events.unbounded_send(BridgeEvent::PromptRejected {
+                draft: crate::state::DraftKey::Session(session),
+                message,
+                attachments,
+                reason: error.to_string(),
+            });
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(
+                error.context("Prompt delivery is uncertain. Check the session before resending.")
+            );
+        }
+    };
+
     if response.success {
         return Ok(());
     }
@@ -887,7 +940,7 @@ async fn submit_prompt(
     let _ = events.unbounded_send(BridgeEvent::PromptRejected {
         draft: crate::state::DraftKey::Session(session),
         message,
-        images,
+        attachments,
         reason,
     });
     Ok(())
@@ -912,7 +965,7 @@ async fn dispatch_request(
             cwd,
             name,
             initial_prompt,
-            images,
+            attachments,
         } => {
             let mut extra = Map::new();
             extra.insert("cwd".to_string(), json!(cwd));
@@ -953,7 +1006,7 @@ async fn dispatch_request(
                         let _ = evt_tx.unbounded_send(BridgeEvent::PromptRejected {
                             draft: crate::state::DraftKey::Project(cwd),
                             message,
-                            images,
+                            attachments,
                             reason: format!("{error:#}"),
                         });
                     }
@@ -961,9 +1014,9 @@ async fn dispatch_request(
                 }
             };
             if let Some(prompt) =
-                initial_prompt.filter(|p| !p.trim().is_empty() || !images.is_empty())
+                initial_prompt.filter(|p| !p.trim().is_empty() || !attachments.is_empty())
             {
-                submit_prompt(client, sid, prompt, images, evt_tx).await?;
+                submit_prompt(client, sid, prompt, attachments, evt_tx).await?;
             }
             refresh_sessions(client, None, evt_tx).await;
         }
@@ -1084,9 +1137,9 @@ async fn dispatch_request(
         BridgeRequest::SendPrompt {
             active_session_id,
             message,
-            images,
+            attachments,
         } => {
-            submit_prompt(client, active_session_id, message, images, evt_tx).await?;
+            submit_prompt(client, active_session_id, message, attachments, evt_tx).await?;
         }
         BridgeRequest::SteerSession {
             active_session_id,

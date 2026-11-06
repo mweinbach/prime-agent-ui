@@ -33,11 +33,16 @@ impl PrimeDesktopView {
             return;
         }
         if self.session.active_session_id.is_empty() {
+            // Stay on this project draft while its files finish staging. The
+            // completion retries the request if the picker is still open.
+            if self.attachments_loading() {
+                return;
+            }
             self.open_session(BridgeRequest::CreateSession {
                 cwd: self.working_cwd.clone(),
                 name: None,
                 initial_prompt: None,
-                images: Vec::new(),
+                attachments: Vec::new(),
             });
         } else if self.catalog_models.is_empty() {
             self.catalog_loaded = false;
