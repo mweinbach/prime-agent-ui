@@ -47,21 +47,7 @@ fn append_folder(
             return;
         }
     }
-    let empty_composer = view.session.active_session_id.is_empty()
-        && view.composer_input.text.is_empty()
-        && view.staged_images.is_empty();
-    rows.extend(
-        group
-            .draft_cwds
-            .iter()
-            .enumerate()
-            .filter_map(|(index, cwd)| {
-                // The fresh composer already belongs to the selected project. The outline
-                // lists conversations and recoverable drafts, including drafts in subfolders.
-                (!empty_composer || cwd != &view.working_cwd)
-                    .then_some(OutlineRow::Draft { group: i, index })
-            }),
-    );
+    rows.extend((0..group.draft_cwds.len()).map(|index| OutlineRow::Draft { group: i, index }));
     if scoped || searching || group.folder().is_none() || group.chats.len() <= PREVIEW_CHATS {
         rows.extend(group.chats.iter().copied().map(OutlineRow::Chat));
     } else {

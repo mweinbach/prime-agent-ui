@@ -585,6 +585,14 @@ mod tests {
         app.frame(0.);
         assert!(!app.state.reasoning_picker_open);
         click(&mut app, "composer-effort-pill");
+        // Rune's pointer-opened listbox reveals the current highlight on the first
+        // arrow. The following arrow moves it without committing a new setting.
+        press(&mut app, Key::Down);
+        assert!(
+            app.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("reasoning-level-low") && e.focus_visible)
+        );
         press(&mut app, Key::Down);
         assert!(
             app.elements()

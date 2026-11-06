@@ -19,10 +19,10 @@ impl PrimeDesktopView {
                     DraftKey::Session(_) => None,
                 })
                 .chain(
-                    self.session
-                        .active_session_id
-                        .is_empty()
-                        .then_some(self.working_cwd.as_str()),
+                    (self.session.active_session_id.is_empty()
+                        && (!self.composer_input.text.is_empty()
+                            || !self.staged_images.is_empty()))
+                    .then_some(self.working_cwd.as_str()),
                 ),
             query,
         )
@@ -241,7 +241,7 @@ mod tests {
                 .iter()
                 .find(|g| g.folder() == Some(elsewhere))
                 .unwrap();
-            assert_eq!(current.draft_cwds, [elsewhere]);
+            assert!(current.draft_cwds.is_empty());
             let project = groups.iter().find(|g| g.added).unwrap();
             assert_eq!(project.draft_cwds, [checkout]);
             view.unpin_project("/work/app");

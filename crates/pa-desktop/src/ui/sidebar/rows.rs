@@ -7,19 +7,18 @@ use crate::state::{ActiveSessionRow, SavedSessionRow, projects::ProjectGroup};
 use crate::theme::Palette;
 use crate::ui::panel_controls::{control, icon_button, label};
 use crate::ui::workspace::PrimeDesktopView;
-use rune::{Cursor, El, col, el, row};
+use rune::{Color, Cursor, El, col, el, row};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
-pub(super) fn project_pin(cwd: &str, pinned: bool, p: Palette) -> El {
+pub(super) fn project_pin(cwd: &str, pinned: bool, reveal: bool, p: Palette) -> El {
     let path = cwd.to_owned();
     let (icon, title) = if pinned {
         (Icon::PinOff, "Unpin project")
     } else {
         (Icon::Pin, "Pin project")
     };
-    icon_button(format!("project-pin-{path}"), title, icon, p)
-        .size(22.0, 24.0)
-        .on_press(move |s: &mut PrimeDesktopView| {
+    row_action(&format!("project-pin-{path}"), title, icon, reveal, p).on_press(
+        move |s: &mut PrimeDesktopView| {
             if pinned {
                 let path = path.clone();
                 s.confirm(
@@ -30,7 +29,8 @@ pub(super) fn project_pin(cwd: &str, pinned: bool, p: Palette) -> El {
             } else {
                 s.pin_project(&path);
             }
-        })
+        },
+    )
 }
 
 pub(super) fn project(
@@ -47,7 +47,8 @@ pub(super) fn project(
         .center_y()
         .gap(2.0)
         .px(2.0);
-    if !searching {
+    let has_children = !group.chats.is_empty() || !group.draft_cwds.is_empty();
+    if !searching && has_children {
         let icon = if group.collapsed {
             Icon::ChevronRight
         } else {
@@ -64,10 +65,12 @@ pub(super) fn project(
                 .size(18.0, 24.0)
                 .on_press(move |s: &mut PrimeDesktopView| s.toggle_project(&key)),
         );
+    } else if !searching {
+        heading = heading.child(el().w(18.0));
     }
     let folder_icon = if group.is_temporary() {
         Icon::History
-    } else if group.collapsed {
+    } else if group.collapsed || !has_children {
         Icon::Folder
     } else {
         Icon::FolderOpen
@@ -116,23 +119,20 @@ pub(super) fn project(
         let pin_key = format!("project-pin-{path}");
         let new_key = format!("project-new-chat-{path}");
         heading = heading
-            .child(row_action(
-                project_pin(&path, group.added, p),
-                focused,
-                &pin_key,
+            .child(project_pin(
+                &path,
+                group.added,
+                focused == Some(&pin_key),
+                p,
             ))
             .child(
                 row_action(
-                    icon_button(
-                        new_key.clone(),
-                        format!("New chat in {}", group.label),
-                        Icon::Compose,
-                        p,
-                    ),
-                    focused,
                     &new_key,
+                    &format!("New chat in {}", group.label),
+                    Icon::Compose,
+                    focused == Some(&new_key),
+                    p,
                 )
-                .size(22.0, 24.0)
                 .on_press(move |s: &mut PrimeDesktopView| s.new_project_chat(&path)),
             );
     } else if group.collapsed {
@@ -146,9 +146,17 @@ pub(super) fn project(
     heading
 }
 
-fn row_action(button: El, focused: Option<&str>, key: &str) -> El {
-    let rest = if focused == Some(key) { 1.0 } else { 0.0 };
-    button.group_opacity(rest, 1.0)
+/// Keep the button and keyboard ring reachable while only its glyph fades.
+fn row_action(key: &str, title: &str, icon: Icon, reveal: bool, p: Palette) -> El {
+    let opacity = if reveal { 1.0 } else { 0.0 };
+    control(key, title, p)
+        .size(22.0, 24.0)
+        .center()
+        .hover(Color::TRANSPARENT)
+        .child(
+            icon.render(14.0, p.text_secondary)
+                .group_opacity(opacity, 1.0),
+        )
 }
 
 pub(super) fn chat(key: String, title: &str, icon: El, selected: bool, p: Palette) -> El {
@@ -223,11 +231,12 @@ pub(super) fn live_chat(
         )
         .child(
             row_action(
-                icon_button(&stop_key, "Stop session", Icon::Stop, p),
-                focused,
                 &stop_key,
+                "Stop session",
+                Icon::Stop,
+                focused == Some(&stop_key),
+                p,
             )
-            .size(22.0, 24.0)
             .on_press(move |s: &mut PrimeDesktopView| {
                 let sid = id.clone();
                 s.confirm(
@@ -276,11 +285,12 @@ pub(super) fn saved_chat(
     }
     item.child(
         row_action(
-            icon_button(&delete_key, "Delete chat", Icon::Trash, p),
-            focused,
             &delete_key,
+            "Delete chat",
+            Icon::Trash,
+            focused == Some(&delete_key),
+            p,
         )
-        .size(22.0, 24.0)
         .on_press(move |s: &mut PrimeDesktopView| {
             let del = del.clone();
             s.confirm(

@@ -119,6 +119,7 @@ impl PrimeDesktopView {
                         .project_folders
                         .iter()
                         .any(|folder| folder == cwd),
+                    true,
                     p,
                 )
             } else {

@@ -347,34 +347,12 @@ impl AttachedSessionState {
         {
             self.cwd = cwd.to_string();
         }
-        if let Some(model) = state.get("model") {
-            match model {
-                Value::String(s) if !s.is_empty() => {
-                    if let Some((prov, id)) = s.split_once('/') {
-                        self.model_provider = Some(prov.to_string());
-                        self.model_id = Some(id.to_string());
-                    } else {
-                        self.model_id = Some(s.clone());
-                    }
-                }
-                Value::Object(map) => {
-                    if let Some(id) = map
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                    {
-                        self.model_id = Some(id.to_string());
-                    }
-                    if let Some(p) = map
-                        .get("provider")
-                        .and_then(Value::as_str)
-                        .filter(|s| !s.is_empty())
-                    {
-                        self.model_provider = Some(p.to_string());
-                    }
-                }
-                _ => {}
-            }
+        let (provider, model_id) = crate::state::models::session_model(state);
+        if let Some(id) = model_id {
+            self.model_id = Some(id.to_owned());
+        }
+        if let Some(provider) = provider {
+            self.model_provider = Some(provider.to_owned());
         }
         if let Some(level) = state
             .get("thinkingLevel")

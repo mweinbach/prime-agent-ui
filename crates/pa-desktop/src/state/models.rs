@@ -4,6 +4,27 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
+/// Session snapshots and `get_state` may use either a model object or its selector.
+pub(crate) fn session_model(state: &Value) -> (Option<&str>, Option<&str>) {
+    match state.get("model") {
+        Some(Value::String(selector)) if !selector.is_empty() => selector
+            .split_once('/')
+            .map_or((None, Some(selector.as_str())), |(provider, id)| {
+                (Some(provider), Some(id))
+            }),
+        Some(Value::Object(model)) => {
+            let field = |key| {
+                model
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .filter(|s| !s.is_empty())
+            };
+            (field("provider"), field("id"))
+        }
+        _ => (None, None),
+    }
+}
+
 /// One selectable model from `get_model_catalog`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatalogModel {

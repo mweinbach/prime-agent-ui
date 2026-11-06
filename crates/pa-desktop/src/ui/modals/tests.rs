@@ -99,3 +99,55 @@ fn picker_tracks_the_current_model_across_providers_and_filters_the_full_catalog
     assert!(app.state.active_modal.is_none());
     assert!(app.state.model_setting_pending());
 }
+
+#[test]
+fn narrow_offline_picker_displays_one_dismissible_error_below_search() {
+    let profile = tempfile::tempdir().unwrap();
+    let mut state = PrimeDesktopView::new(
+        LaunchOptions {
+            daemon_socket: Some(profile.path().join("absent.sock")),
+            ..LaunchOptions::default()
+        },
+        profile.path().to_owned(),
+    );
+    state.toast = Some((
+        format!(
+            "Connection failed at /{}",
+            "a-long-unbroken-path/".repeat(8)
+        ),
+        true,
+    ));
+    state.open_modal(ActiveModal::ModelPicker);
+    let mut app = Runtime::new(
+        state,
+        PrimeDesktopView::view,
+        (660.0, 540.0),
+        Env::default(),
+    );
+    app.frame(0.0);
+    let bounds = |key: &str| {
+        app.elements()
+            .into_iter()
+            .find(|e| e.key.as_deref() == Some(key))
+            .unwrap()
+            .visible
+    };
+    let search = bounds("modal-search");
+    let notice = bounds("toast-banner");
+    assert!(notice[1] >= search[1] + search[3]);
+    assert!(notice[3] > 20.0 && notice[2] > 100.0);
+    let plain_hint = "Connect to the daemon to load models.";
+    assert!(
+        !app.elements()
+            .iter()
+            .any(|el| el.text.as_deref() == Some(plain_hint))
+    );
+    click(&mut app, "toast-banner");
+    assert!(app.state.toast.is_none());
+    assert_eq!(app.state.active_modal, Some(ActiveModal::ModelPicker));
+    assert!(
+        app.elements()
+            .iter()
+            .any(|el| el.text.as_deref() == Some(plain_hint))
+    );
+}

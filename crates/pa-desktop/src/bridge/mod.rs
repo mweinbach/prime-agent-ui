@@ -113,6 +113,8 @@ pub enum BridgeRequest {
     SetThinkingLevel {
         request_id: uuid::Uuid,
         active_session_id: String,
+        provider: String,
+        model_id: String,
         level: String,
     },
     SetAutoCompaction {
@@ -1204,8 +1206,8 @@ async fn dispatch_request(
                         DaemonCommand::SetModel {
                             id: None,
                             active_session_id: active_session_id.clone(),
-                            provider: provider.clone(),
-                            model_id: model_id.clone(),
+                            provider,
+                            model_id,
                             rest: Map::new(),
                         },
                         std_timeout,
@@ -1217,15 +1219,31 @@ async fn dispatch_request(
         BridgeRequest::SetThinkingLevel {
             request_id,
             active_session_id,
+            provider,
+            model_id,
             level,
         } => {
+            // The shared CLI can switch models without a desktop interaction. Check
+            // the daemon's model before applying a level advertised by the open menu.
+            let current = read_session_state(client, &active_session_id).await?;
+            if crate::state::models::session_model(&current)
+                != (Some(provider.as_str()), Some(model_id.as_str()))
+            {
+                let _ = evt_tx.unbounded_send(BridgeEvent::SessionEvent {
+                    active_session_id,
+                    event: json!({"type":"desktop_state_sync", "state":current}),
+                });
+                anyhow::bail!(
+                    "The session model changed. Choose a reasoning effort for its current model."
+                );
+            }
             check_daemon_ok(
                 client
                     .request(
                         DaemonCommand::SetThinkingLevel {
                             id: None,
                             active_session_id: active_session_id.clone(),
-                            level: level.clone(),
+                            level,
                             rest: Map::new(),
                         },
                         std_timeout,
@@ -1806,24 +1824,31 @@ async fn report_model_setting(
     request_id: uuid::Uuid,
     evt_tx: &futures_mpsc::UnboundedSender<BridgeEvent>,
 ) -> Result<()> {
-    let response = client
-        .request(
-            DaemonCommand::GetState {
-                id: None,
-                active_session_id: active_session_id.clone(),
-                rest: Map::new(),
-            },
-            Duration::from_secs(10),
-        )
+    let state = read_session_state(client, &active_session_id)
         .await
         .context("Selection applied, but the updated session could not be read")?;
-    let state = check_daemon_ok(response)?;
     let _ = evt_tx.unbounded_send(BridgeEvent::ModelSettingFinished {
         active_session_id,
         request_id,
         state: Ok(state),
     });
     Ok(())
+}
+
+async fn read_session_state(client: &RawClient, active_session_id: &str) -> Result<Value> {
+    let response = client
+        .request(
+            DaemonCommand::GetState {
+                id: None,
+                active_session_id: active_session_id.to_owned(),
+                rest: Map::new(),
+            },
+            Duration::from_secs(10),
+        )
+        .await?;
+    let state = check_daemon_ok(response)?;
+    anyhow::ensure!(state.is_object(), "The daemon returned no session state");
+    Ok(state)
 }
 
 #[cfg(test)]

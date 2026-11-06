@@ -99,7 +99,9 @@ impl PrimeDesktopView {
         } else {
             Transition::opacity()
         });
-        if let Some(toast) = self.notification(p) {
+        if (self.confirm.is_some() || self.active_modal == Some(ActiveModal::SettingsAuth))
+            && let Some(toast) = self.notification(p)
+        {
             card = card.child(toast.pin(None, None, Some(12.0), Some(12.0)));
         }
         Some(
@@ -200,6 +202,7 @@ impl PrimeDesktopView {
         }
 
         let height = (100.0
+            + if self.toast.is_some() { 60.0 } else { 0.0 }
             + items
                 .iter()
                 .map(|item| match item {
@@ -208,72 +211,77 @@ impl PrimeDesktopView {
                 })
                 .sum::<f32>())
         .clamp(164.0, 452.0);
-        let result = if items.is_empty() {
-            let message = if !self.daemon_connected {
-                "Connect to the daemon to load models."
-            } else if self.model_setting_pending() {
-                "Applying selection…"
-            } else if !self.model_picker_ready() || !self.model_catalog_loaded() {
-                "Loading models…"
-            } else if !self.modal_search_input.text.trim().is_empty() {
-                "No matching models."
-            } else if self.model_picker_configured_only {
-                "No models from configured providers."
+        let result =
+            if !self.daemon_connected && self.toast.as_ref().is_some_and(|(_, error)| *error) {
+                // The daemon error is the empty state until it is dismissed.
+                el().h(0.0)
+            } else if items.is_empty() {
+                let message = if !self.daemon_connected {
+                    "Connect to the daemon to load models."
+                } else if self.model_setting_pending() {
+                    "Applying selection…"
+                } else if !self.model_picker_ready() || !self.model_catalog_loaded() {
+                    "Loading models…"
+                } else if !self.modal_search_input.text.trim().is_empty() {
+                    "No matching models."
+                } else if self.model_picker_configured_only {
+                    "No models from configured providers."
+                } else {
+                    "The daemon returned no models."
+                };
+                picker_empty(message, p)
             } else {
-                "The daemon returned no models."
+                let rows = Rc::new(items);
+                let keys = Rc::clone(&rows);
+                let choices_for_keys = Rc::clone(&choices);
+                let list = col()
+                    .key("catalog-rows")
+                    .growth(GrowthSpec::default())
+                    .virtual_rows(
+                        rows.len(),
+                        34.0,
+                        move |_: &Self, i| {
+                            match keys[i] {
+                                ModelListRow::Provider(rank) => {
+                                    format!("provider-{}", choices_for_keys[rank].provider)
+                                }
+                                ModelListRow::Choice(rank) => choices_for_keys[rank].key(),
+                            }
+                            .into()
+                        },
+                        move |s: &Self, i| {
+                            let rank = match rows[i] {
+                                ModelListRow::Provider(rank) | ModelListRow::Choice(rank) => rank,
+                            };
+                            // A retained builder can run after a daemon refresh but before this
+                            // snapshot gets replaced. Never reinterpret its old catalog indices.
+                            let Some(index) = choices[rank].resolve(&s.catalog_models) else {
+                                return el();
+                            };
+                            match rows[i] {
+                                ModelListRow::Provider(_) => {
+                                    provider_heading(&s.catalog_models[index], &s.catalog_models, p)
+                                }
+                                ModelListRow::Choice(_) => {
+                                    s.model_option(index, Some(rank) == selected, &session, p)
+                                }
+                            }
+                        },
+                    );
+                picker_viewport()
+                    .role("listbox")
+                    .label("Models")
+                    .child(list)
             };
-            picker_empty(message, p)
-        } else {
-            let rows = Rc::new(items);
-            let keys = Rc::clone(&rows);
-            let choices_for_keys = Rc::clone(&choices);
-            let list = col()
-                .key("catalog-rows")
-                .growth(GrowthSpec::default())
-                .virtual_rows(
-                    rows.len(),
-                    34.0,
-                    move |_: &Self, i| {
-                        match keys[i] {
-                            ModelListRow::Provider(rank) => {
-                                format!("provider-{}", choices_for_keys[rank].provider)
-                            }
-                            ModelListRow::Choice(rank) => choices_for_keys[rank].key(),
-                        }
-                        .into()
-                    },
-                    move |s: &Self, i| {
-                        let rank = match rows[i] {
-                            ModelListRow::Provider(rank) | ModelListRow::Choice(rank) => rank,
-                        };
-                        // A retained builder can run after a daemon refresh but before this
-                        // snapshot gets replaced. Never reinterpret its old catalog indices.
-                        let Some(index) = choices[rank].resolve(&s.catalog_models) else {
-                            return el();
-                        };
-                        match rows[i] {
-                            ModelListRow::Provider(_) => {
-                                provider_heading(&s.catalog_models[index], &s.catalog_models, p)
-                            }
-                            ModelListRow::Choice(_) => {
-                                s.model_option(index, Some(rank) == selected, &session, p)
-                            }
-                        }
-                    },
-                );
-            picker_viewport()
-                .role("listbox")
-                .label("Models")
-                .child(list)
-        };
-        col()
+        let panel = col()
             .h(height)
             .min_h(0.0)
             .shrink()
             .label("Choose model")
             .child(col().padding(13.0).gap(8.0).child(title).child(search))
             .child(el().h(1.0).fill(p.border_subtle))
-            .child(result)
+            .child(result);
+        self.with_picker_notice(panel, p)
     }
 
     fn model_filter(&self, p: Palette) -> El {
@@ -446,8 +454,11 @@ impl PrimeDesktopView {
         } else {
             picker_viewport().child(col().children(rows))
         };
-        col()
-            .h((70.0 + 34.0 * count as f32).clamp(105.0, 448.0))
+        let panel = col()
+            .h(
+                (70.0 + 34.0 * count as f32 + if self.toast.is_some() { 60.0 } else { 0.0 })
+                    .clamp(105.0, 448.0),
+            )
             .min_h(0.0)
             .shrink()
             .label("Quick switcher")
@@ -464,7 +475,38 @@ impl PrimeDesktopView {
                     ),
             )
             .child(el().h(1.0).fill(p.border_subtle))
-            .child(results)
+            .child(results);
+        self.with_picker_notice(panel, p)
+    }
+
+    fn with_picker_notice(&self, panel: El, p: Palette) -> El {
+        let Some((message, error)) = self.toast.as_ref() else {
+            return panel;
+        };
+        let notice = control("toast-banner", "Dismiss notification", p)
+            .description(message.clone())
+            .help(message.clone())
+            .min_w(0.0)
+            .px(9.0)
+            .py(8.0)
+            .center_y()
+            .gap(8.0)
+            .child(el().size(5.0, 5.0).radius(3.0).fill(if *error {
+                p.danger
+            } else {
+                p.text_muted
+            }))
+            .child(
+                label(message, 12.0, 400.0, p.text_secondary)
+                    .key("toast-message")
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .wrap_anywhere()
+                    .max_lines(3),
+            )
+            .child(Icon::Close.render(13.0, p.text_muted))
+            .on_press(|s: &mut Self| s.toast = None);
+        panel.child(col().px(6.0).py(5.0).child(notice))
     }
 
     fn picker_search(
