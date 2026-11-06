@@ -526,7 +526,7 @@ impl PrimeDesktopView {
                             |s| &mut s.harness_body_input,
                         )
                         .font(TextStyle::new(13.0, 400.0).mono().lh(20.0))
-                        .on_key(|s: &mut Self, event, _| {
+                        .on_input_key(|s: &mut Self, event, _| {
                             if event.key == Key::Enter && event.mods.cmd {
                                 s.save_harness_editor();
                                 return true;

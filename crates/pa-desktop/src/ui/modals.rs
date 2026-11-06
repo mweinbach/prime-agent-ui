@@ -78,6 +78,8 @@ impl PrimeDesktopView {
         card = card
             .key(key)
             .role("dialog")
+            .transition(Transition::none())
+            .instant_changes()
             .radius(16.0)
             .clip_rounded(16.0)
             .border(1.0, p.border_strong)
@@ -86,15 +88,18 @@ impl PrimeDesktopView {
         // Fade only the scrim. A sheet with a Rune presence transition ignores
         // pointer presses until its entrance is under way.
         let mut scrim = el().absolute(0.0, 0.0).w_full().h_full().fill(p.bg_scrim);
-        if !self.prefs.reduce_motion && !cx.is_reduced_motion() {
-            scrim = scrim.transition(Transition::opacity());
-        }
+        scrim = scrim.transition(if self.prefs.reduce_motion || cx.is_reduced_motion() {
+            Transition::none()
+        } else {
+            Transition::opacity()
+        });
         if let Some(toast) = self.notification(p) {
             card = card.child(toast.pin(None, None, Some(12.0), Some(12.0)));
         }
         Some(
             col()
                 .key("modal-backdrop-scrim")
+                .transition(Transition::none())
                 .absolute(0.0, 0.0)
                 .w_full()
                 .h_full()
