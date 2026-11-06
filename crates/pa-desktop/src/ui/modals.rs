@@ -1,6 +1,12 @@
 //! Command and model pickers, provider settings, and destructive-action confirmations.
 
-use rune::{Cx, El, Key, ScrollSpec, Transition, col, el, row};
+use std::fmt::Write as _;
+use std::rc::Rc;
+
+use rune::{Cx, El, GrowthSpec, Key, ScrollSpec, Transition, col, el, row};
+
+#[cfg(test)]
+mod tests;
 
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
@@ -66,8 +72,8 @@ impl PrimeDesktopView {
         } else {
             let modal = self.active_modal?;
             let (key, content) = match modal {
-                ActiveModal::QuickSwitcher => ("quick-switcher", self.picker(false, p)),
-                ActiveModal::ModelPicker => ("model-picker", self.picker(true, p)),
+                ActiveModal::QuickSwitcher => ("quick-switcher", self.command_picker(p)),
+                ActiveModal::ModelPicker => ("model-picker", self.model_picker(p)),
                 ActiveModal::SettingsAuth => ("settings", self.settings(p)),
             };
             (
@@ -110,113 +116,366 @@ impl PrimeDesktopView {
         )
     }
 
-    fn matching_models(&self) -> Vec<&CatalogModel> {
+    /// Real catalog indices, in the same order for rendering and keyboard submission.
+    fn matching_models(&self) -> Vec<usize> {
+        if !self.model_picker_ready() {
+            return Vec::new();
+        }
         let query = &self.modal_search_input.text;
-        self.catalog_models
+        let mut choices: Vec<_> = self
+            .catalog_models
             .iter()
-            .filter(|m| {
-                (!self.model_picker_configured_only || m.configured) && m.matches_query(query)
+            .enumerate()
+            .filter(|(_, model)| {
+                (!self.model_picker_configured_only || model.configured)
+                    && model.matches_query(query)
             })
-            .take(90)
-            .collect()
+            .map(|(index, _)| index)
+            .collect();
+        if let Some(current) = self.current_catalog_model() {
+            // Start on the actual model when present. Keep its provider together
+            // and preserve the daemon catalog order within the other groups.
+            choices.sort_by_key(|&i| {
+                let model = &self.catalog_models[i];
+                if model.provider == current.provider {
+                    u8::from(model.id != current.id)
+                } else {
+                    2
+                }
+            });
+        }
+        choices
     }
 
-    fn picker(&self, models: bool, p: Palette) -> El {
-        let mut rows = Vec::new();
-        if models {
-            let matching = self.matching_models();
-            let selected = self
-                .modal_selected_idx
-                .min(matching.len().saturating_sub(1));
-            for (index, model) in matching.into_iter().enumerate() {
-                let provider = model.provider.clone();
-                let id = model.id.clone();
-                let is_current = self.session.model_provider.as_deref() == Some(&provider)
-                    && self.session.model_id.as_deref() == Some(&id);
-                let mut badges = Vec::new();
-                if model.reasoning {
-                    badges.push("reasoning".into());
+    fn model_picker(&self, p: Palette) -> El {
+        let session = self.session.active_session_id.clone();
+        let choices: Rc<Vec<CatalogChoice>> = Rc::new(
+            self.matching_models()
+                .into_iter()
+                .map(|index| {
+                    let model = &self.catalog_models[index];
+                    CatalogChoice {
+                        index,
+                        provider: model.provider.clone(),
+                        id: model.id.clone(),
+                    }
+                })
+                .collect(),
+        );
+        let navigation = Rc::new(PickerNavigation {
+            keys: choices.iter().map(CatalogChoice::key).collect(),
+            model_session: Some(session.clone()),
+        });
+        let selected = navigation.selected(self);
+        let choices_for_submit = Rc::clone(&choices);
+        let expected = session.clone();
+        let search = self.picker_search(
+            "Search models or providers",
+            p,
+            navigation,
+            move |s, index| {
+                if let Some(choice) = choices_for_submit.get(index) {
+                    s.select_model_for(&expected, &choice.provider, &choice.id);
                 }
-                if model.supports_images {
-                    badges.push("vision".into());
-                }
-                badges.push(format_tokens_compact(model.context_window));
-                let title = row()
-                    .gap(5.0)
-                    .center_y()
-                    .child(label(&model.name, 13.0, 500.0, p.text_primary).truncate());
-                let title = if is_current {
-                    title.child(Icon::Check.render(13.0, p.accent))
-                } else {
-                    title
-                };
-                let content = row()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .center_y()
-                    .gap(6.0)
-                    .child(
-                        col().grow(1.0).min_w(0.0).gap(2.0).child(title).child(
-                            label(
-                                format!("{} · {id}", model.provider_display()),
-                                11.0,
-                                400.0,
-                                p.text_muted,
-                            )
-                            .truncate(),
-                        ),
-                    )
-                    .children(badges.into_iter().map(|b| {
-                        label(b, 10.0, 400.0, p.text_secondary)
-                            .px(5.0)
-                            .py(3.0)
-                            .radius(5.0)
-                            .fill(p.bg_code)
-                    }));
-                rows.push(
-                    result_row(index, &model.name, selected, p)
-                        .child(content)
-                        .on_press(move |s: &mut Self| s.select_model(&provider, &id)),
-                );
+            },
+        );
+        let filter = self.model_filter(p);
+        let title = row()
+            .center_y()
+            .gap(8.0)
+            .child(label("Choose model", 17.0, 600.0, p.text_primary).grow(1.0))
+            .child(filter)
+            .child(
+                icon_button("close-picker", "Close model picker", Icon::Close, p)
+                    .on_press(Self::close_modal),
+            );
+        let mut items = Vec::new();
+        let mut previous = None;
+        for (rank, choice) in choices.iter().enumerate() {
+            if previous != Some(choice.provider.as_str()) {
+                items.push(ModelListRow::Provider(rank));
+                previous = Some(choice.provider.as_str());
             }
-        } else {
-            let commands = switch_rows(self);
-            let selected = self
-                .modal_selected_idx
-                .min(commands.len().saturating_sub(1));
-            for (index, command) in commands.into_iter().enumerate() {
-                let title = command.title.clone();
-                let content = row()
-                    .grow(1.0)
-                    .min_w(0.0)
-                    .center_y()
-                    .gap(7.0)
-                    .child(
-                        label(title, 13.0, 500.0, p.text_primary)
-                            .grow(1.0)
-                            .min_w(0.0)
-                            .truncate(),
-                    )
-                    .child(
-                        label(command.hint, 11.0, 400.0, p.text_muted)
-                            .max_w(170.0)
-                            .truncate(),
-                    );
-                rows.push(
-                    result_row(index, &command.title, selected, p)
-                        .h(36.0)
-                        .child(content.key(command.id))
-                        .on_press(move |s: &mut Self| command.target.activate(s)),
-                );
-            }
+            items.push(ModelListRow::Choice(rank));
         }
-        let count = rows.len();
-        let placeholder = if models {
-            "Search models or providers…"
+
+        let height = (100.0
+            + items
+                .iter()
+                .map(|item| match item {
+                    ModelListRow::Provider(_) => 28.0,
+                    ModelListRow::Choice(_) => 34.0,
+                })
+                .sum::<f32>())
+        .clamp(164.0, 452.0);
+        let result = if items.is_empty() {
+            let message = if !self.daemon_connected {
+                "Connect to the daemon to load models."
+            } else if self.model_setting_pending() {
+                "Applying selection…"
+            } else if !self.model_picker_ready() || !self.model_catalog_loaded() {
+                "Loading models…"
+            } else if !self.modal_search_input.text.trim().is_empty() {
+                "No matching models."
+            } else if self.model_picker_configured_only {
+                "No models from configured providers."
+            } else {
+                "The daemon returned no models."
+            };
+            picker_empty(message, p)
         } else {
-            "Search commands, projects, or chats…"
+            let rows = Rc::new(items);
+            let keys = Rc::clone(&rows);
+            let choices_for_keys = Rc::clone(&choices);
+            let list = col()
+                .key("catalog-rows")
+                .growth(GrowthSpec::default())
+                .virtual_rows(
+                    rows.len(),
+                    34.0,
+                    move |_: &Self, i| {
+                        match keys[i] {
+                            ModelListRow::Provider(rank) => {
+                                format!("provider-{}", choices_for_keys[rank].provider)
+                            }
+                            ModelListRow::Choice(rank) => choices_for_keys[rank].key(),
+                        }
+                        .into()
+                    },
+                    move |s: &Self, i| {
+                        let rank = match rows[i] {
+                            ModelListRow::Provider(rank) | ModelListRow::Choice(rank) => rank,
+                        };
+                        // A retained builder can run after a daemon refresh but before this
+                        // snapshot gets replaced. Never reinterpret its old catalog indices.
+                        let Some(index) = choices[rank].resolve(&s.catalog_models) else {
+                            return el();
+                        };
+                        match rows[i] {
+                            ModelListRow::Provider(_) => {
+                                provider_heading(&s.catalog_models[index], &s.catalog_models, p)
+                            }
+                            ModelListRow::Choice(_) => {
+                                s.model_option(index, Some(rank) == selected, &session, p)
+                            }
+                        }
+                    },
+                );
+            picker_viewport()
+                .role("listbox")
+                .label("Models")
+                .child(list)
         };
-        let search = field(
+        col()
+            .h(height)
+            .min_h(0.0)
+            .shrink()
+            .label("Choose model")
+            .child(col().padding(13.0).gap(8.0).child(title).child(search))
+            .child(el().h(1.0).fill(p.border_subtle))
+            .child(result)
+    }
+
+    fn model_filter(&self, p: Palette) -> El {
+        let mut options = row()
+            .role("group")
+            .label("Model providers")
+            .gap(2.0)
+            .padding(2.0)
+            .radius(7.0)
+            .fill(p.bg_code);
+        for (configured, title, key) in [
+            (false, "All", "show-all-models"),
+            (true, "Configured", "toggle-configured-models"),
+        ] {
+            let chosen = configured == self.model_picker_configured_only;
+            let mut option = control(key, format!("{title} providers"), p)
+                .role("radio")
+                .checked(chosen)
+                .h(23.0)
+                .px(8.0)
+                .radius(5.0)
+                .center()
+                .child(label(
+                    title,
+                    11.5,
+                    if chosen { 550.0 } else { 400.0 },
+                    if chosen {
+                        p.text_primary
+                    } else {
+                        p.text_secondary
+                    },
+                ));
+            if chosen {
+                option = option.fill(p.bg_elevated).border(1.0, p.border_subtle);
+            }
+            options = options.child(option.on_press_tx(move |s: &mut Self, tx| {
+                s.model_picker_configured_only = configured;
+                s.modal_model_key = None;
+                s.modal_selected_idx = 0;
+                s.focus_input(|s| &mut s.modal_search_input);
+                tx.scroll_to_y("picker-results", 0.0);
+            }));
+        }
+        options
+    }
+
+    fn model_option(
+        &self,
+        index: usize,
+        highlighted: bool,
+        expected_session: &str,
+        p: Palette,
+    ) -> El {
+        let model = &self.catalog_models[index];
+        let current = self.session.model_provider.as_deref() == Some(model.provider.as_str())
+            && self.session.model_id.as_deref() == Some(model.id.as_str());
+        let mut details = model.selector();
+        if model.context_window > 0 {
+            let _ = write!(
+                details,
+                " · {} context",
+                format_tokens_compact(model.context_window)
+            );
+        }
+        if model.reasoning {
+            details.push_str(" · reasoning");
+        }
+        if model.supports_images {
+            details.push_str(" · images");
+        }
+        let mut option = result_row(model_key(model), &model.name, highlighted, p)
+            .role("option")
+            .focus_selected(current)
+            .tab_index(-1)
+            .help(details)
+            .child(
+                label(
+                    &model.name,
+                    13.0,
+                    if current { 550.0 } else { 400.0 },
+                    p.text_primary,
+                )
+                .min_w(0.0)
+                .grow(1.0)
+                .truncate(),
+            );
+        // The catalog is sorted by name within a provider. Distinguish versions
+        // that share a display name, while keeping ordinary rows to a single label.
+        let same_name = |other: &&CatalogModel| {
+            other.provider == model.provider && other.name == model.name && other.id != model.id
+        };
+        if self
+            .catalog_models
+            .get(index.wrapping_sub(1))
+            .iter()
+            .chain(self.catalog_models.get(index + 1).iter())
+            .any(same_name)
+        {
+            option = option.child(
+                label(&model.id, 11.0, 400.0, p.text_secondary)
+                    .max_w(210.0)
+                    .truncate(),
+            );
+        }
+        if current {
+            option = option.description("Current model").child(
+                Icon::Check
+                    .render(14.0, p.text_primary)
+                    .key("current-model-check"),
+            );
+        }
+        let (session, provider, id) = (
+            expected_session.to_owned(),
+            model.provider.clone(),
+            model.id.clone(),
+        );
+        option.on_press(move |s: &mut Self| {
+            s.select_model_for(&session, &provider, &id);
+        })
+    }
+
+    fn command_picker(&self, p: Palette) -> El {
+        let commands = Rc::new(switch_rows(self));
+        let count = commands.len();
+        let navigation = Rc::new(PickerNavigation {
+            keys: commands
+                .iter()
+                .enumerate()
+                .map(|(i, _)| format!("picker-row-{i}"))
+                .collect(),
+            model_session: None,
+        });
+        let selected = navigation.selected(self);
+        let submitted = Rc::clone(&commands);
+        let search = self.picker_search(
+            "Search commands, projects, or chats",
+            p,
+            navigation,
+            move |s, index| {
+                if let Some(command) = submitted.get(index) {
+                    command.target.activate(s);
+                }
+            },
+        );
+        let rows = commands.iter().enumerate().map(|(i, command)| {
+            let commands = Rc::clone(&commands);
+            result_row(
+                format!("picker-row-{i}"),
+                &command.title,
+                Some(i) == selected,
+                p,
+            )
+            .tab_index(-1)
+            .child(
+                label(&command.title, 13.0, 500.0, p.text_primary)
+                    .key(&command.id)
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .truncate(),
+            )
+            .child(
+                label(&command.hint, 11.0, 400.0, p.text_muted)
+                    .max_w(170.0)
+                    .truncate(),
+            )
+            .on_press(move |s: &mut Self| commands[i].target.activate(s))
+        });
+        let results = if count == 0 {
+            picker_empty("No matching commands, projects, or chats.", p)
+        } else {
+            picker_viewport().child(col().children(rows))
+        };
+        col()
+            .h((70.0 + 34.0 * count as f32).clamp(105.0, 448.0))
+            .min_h(0.0)
+            .shrink()
+            .label("Quick switcher")
+            .child(
+                row()
+                    .center_y()
+                    .px(12.0)
+                    .py(8.0)
+                    .gap(6.0)
+                    .child(search.grow(1.0))
+                    .child(
+                        icon_button("close-picker", "Close quick switcher", Icon::Close, p)
+                            .on_press(Self::close_modal),
+                    ),
+            )
+            .child(el().h(1.0).fill(p.border_subtle))
+            .child(results)
+    }
+
+    fn picker_search(
+        &self,
+        placeholder: &str,
+        p: Palette,
+        navigation: Rc<PickerNavigation>,
+        submit: impl Fn(&mut Self, usize) + 'static,
+    ) -> El {
+        let submitted = Rc::clone(&navigation);
+        let mut input = field(
             "modal-search",
             &self.modal_search_input,
             placeholder,
@@ -224,114 +483,58 @@ impl PrimeDesktopView {
             |s| &mut s.modal_search_input,
         )
         .single_line()
-        .min_w(0.0)
         .grow(1.0)
-        .on_submit(|s: &mut Self, _| s.submit_modal_selection())
+        .min_w(0.0)
+        .on_submit(move |s: &mut Self, _| {
+            if let Some(index) = submitted.selected(s) {
+                submit(s, index);
+            }
+        })
         .on_input_change(|s: &mut Self, tx| {
+            s.modal_model_key = None;
             s.modal_selected_idx = 0;
             tx.scroll_to_y("picker-results", 0.0);
-        })
-        .on_input_key(move |s: &mut Self, event, tx| {
-            match event.key {
-                Key::Up => {
-                    s.modal_selected_idx = s
-                        .modal_selected_idx
-                        .saturating_sub(1)
-                        .min(count.saturating_sub(1));
-                }
-                Key::Down => {
-                    s.modal_selected_idx = (s.modal_selected_idx + 1).min(count.saturating_sub(1));
-                }
-                Key::Escape if event.mods == rune::Mods::default() => return s.dismiss_overlay(),
-                _ => return false,
+        });
+        if let Some(index) = navigation.selected(self) {
+            input = input.active_descendant(navigation.keys[index].clone());
+        }
+        input = input.on_input_key(move |s: &mut Self, event, tx| {
+            if event.key == Key::Escape && event.mods == rune::Mods::default() {
+                return s.dismiss_overlay();
             }
-            if count > 0 {
-                tx.scroll_into_view(format!("picker-row-{}", s.modal_selected_idx));
+            let selected = navigation.selected(s);
+            let last = navigation.keys.len().saturating_sub(1);
+            let index = match event.key {
+                Key::Up => selected.map_or(0, |i| i.saturating_sub(1)),
+                Key::Down => selected.map_or(0, |i| (i + 1).min(last)),
+                _ => return false,
+            };
+            if let Some(key) = navigation.keys.get(index) {
+                s.modal_selected_idx = index;
+                if let Some(session) = &navigation.model_session {
+                    s.modal_model_key = Some((session.clone(), key.clone()));
+                }
+                tx.scroll_into_view(key.clone());
             }
             true
         });
-        if rows.is_empty() {
-            rows.push(
-                label(
-                    if models {
-                        "No matching models. Try another search or change the provider filter."
-                    } else {
-                        "No matching commands, projects, or chats."
-                    },
-                    13.0,
-                    400.0,
-                    p.text_muted,
-                )
-                .padding(12.0)
-                .wrap(),
-            );
-        }
-        let mut search_bar = row()
-            .h(34.0)
+        row()
+            .h(32.0)
             .center_y()
+            .px(8.0)
             .gap(7.0)
-            .child(Icon::Search.render(14.0, p.text_muted))
-            .child(search);
-        let close =
-            icon_button("close-picker", "Close", Icon::Close, p).on_press(Self::close_modal);
-        let top = if models {
-            let filter = if self.model_picker_configured_only {
-                "Configured providers"
-            } else {
-                "All catalog models"
-            };
-            let filter = button("toggle-configured-models", filter, p)
-                .fill(if self.model_picker_configured_only {
-                    p.accent_soft
+            .radius(6.0)
+            .fill(p.bg_canvas)
+            .border(
+                1.0,
+                if self.modal_search_input.focused {
+                    p.border_strong
                 } else {
-                    p.bg_code
-                })
-                .on_press_tx(|s: &mut Self, tx| {
-                    s.model_picker_configured_only = !s.model_picker_configured_only;
-                    s.modal_selected_idx = 0;
-                    tx.scroll_to_y("picker-results", 0.0);
-                });
-            let header = row()
-                .h(32.0)
-                .gap(6.0)
-                .center_y()
-                .child(
-                    label("Choose a model", 17.0, 600.0, p.text_primary)
-                        .grow(1.0)
-                        .min_w(0.0),
-                )
-                .child(filter)
-                .child(close);
-            search_bar = search_bar
-                .px(8.0)
-                .radius(8.0)
-                .border(1.0, p.accent)
-                .fill(p.bg_code);
-            col().padding(14.0).gap(8.0).child(header).child(search_bar)
-        } else {
-            col().px(14.0).py(6.0).child(search_bar.child(close))
-        };
-        let height = if models {
-            480.0
-        } else {
-            (64.0 + 38.0 * rows.len() as f32).min(480.0)
-        };
-        col()
-            .h(height)
-            .min_h(0.0)
-            .shrink()
-            .child(top)
-            .child(el().h(1.0).fill(p.border_subtle))
-            .child(
-                col()
-                    .key("picker-results")
-                    .min_h(0.0)
-                    .grow(1.0)
-                    .scroll(ScrollSpec {
-                        stick_bottom: false,
-                    })
-                    .child(col().padding(8.0).gap(2.0).children(rows)),
+                    p.border_subtle
+                },
             )
+            .child(Icon::Search.render(14.0, p.text_muted))
+            .child(input.no_focus_ring())
     }
 
     fn settings(&self, p: Palette) -> El {
@@ -554,17 +757,102 @@ fn settings_group(p: Palette) -> El {
         .fill(p.bg_canvas)
 }
 
-fn result_row(index: usize, title: &str, selected: usize, p: Palette) -> El {
-    let item = control(format!("picker-row-{index}"), title, p)
-        .h(43.0)
-        .px(8.0)
-        .center_y();
-    if index == selected {
-        item.fill(p.bg_selected)
+struct PickerNavigation {
+    keys: Vec<String>,
+    model_session: Option<String>,
+}
+
+impl PickerNavigation {
+    fn selected(&self, view: &PrimeDesktopView) -> Option<usize> {
+        if let Some(session) = &self.model_session {
+            if session != &view.session.active_session_id {
+                return None;
+            }
+            if let Some((chosen_session, key)) = &view.modal_model_key {
+                if chosen_session != session {
+                    return None;
+                }
+                return self.keys.iter().position(|item| item == key);
+            }
+        }
+        (!self.keys.is_empty()).then(|| view.modal_selected_idx.min(self.keys.len() - 1))
+    }
+}
+
+struct CatalogChoice {
+    index: usize,
+    provider: String,
+    id: String,
+}
+impl CatalogChoice {
+    fn key(&self) -> String {
+        format!("model-option-{}/{}", self.provider, self.id)
+    }
+    fn resolve(&self, catalog: &[CatalogModel]) -> Option<usize> {
+        let matches = |m: &CatalogModel| m.provider == self.provider && m.id == self.id;
+        if catalog.get(self.index).is_some_and(matches) {
+            Some(self.index)
+        } else {
+            catalog.iter().position(matches)
+        }
+    }
+}
+#[derive(Clone, Copy)]
+enum ModelListRow {
+    Provider(usize),
+    Choice(usize),
+}
+
+fn model_key(model: &CatalogModel) -> String {
+    format!("model-option-{}", model.selector())
+}
+
+fn provider_heading(model: &CatalogModel, catalog: &[CatalogModel], p: Palette) -> El {
+    let mut header = row().h(28.0).center_y().gap(8.0).px(8.0).child(
+        label(model.provider_display(), 11.5, 600.0, p.text_secondary)
+            .grow(1.0)
+            .min_w(0.0)
+            .truncate(),
+    );
+    // Different Google backends can share a display name and advertise the same model.
+    if catalog.iter().any(|other| {
+        other.provider != model.provider && other.provider_display() == model.provider_display()
+    }) {
+        header = header.child(label(&model.provider, 10.5, 400.0, p.text_muted).truncate());
+    }
+    if !model.configured {
+        header = header.child(label("Unconfigured", 10.5, 400.0, p.text_muted));
+    }
+    header.help(&model.provider)
+}
+
+fn picker_viewport() -> El {
+    col()
+        .key("picker-results")
+        .grow(1.0)
+        .min_h(0.0)
+        .px(7.0)
+        .py(5.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+}
+
+fn picker_empty(message: &str, p: Palette) -> El {
+    label(message, 13.0, 400.0, p.text_secondary)
+        .padding(15.0)
+        .wrap()
+}
+
+fn result_row(key: String, title: &str, highlighted: bool, p: Palette) -> El {
+    let item = control(key, title, p).h(34.0).px(9.0).gap(7.0).center_y();
+    if highlighted {
+        item.fill(p.bg_hover).border(1.0, p.border_subtle)
     } else {
         item
     }
 }
+
 enum SwitchTarget {
     Command(&'static str),
     Project(String),
@@ -594,31 +882,6 @@ impl SwitchTarget {
                 view.open_session(request.clone());
                 view.close_modal();
             }
-        }
-    }
-}
-
-impl PrimeDesktopView {
-    pub(super) fn submit_modal_selection(&mut self) {
-        match self.active_modal {
-            Some(ActiveModal::ModelPicker) => {
-                let models = self.matching_models();
-                if let Some(model) =
-                    models.get(self.modal_selected_idx.min(models.len().saturating_sub(1)))
-                {
-                    let (provider, id) = (model.provider.clone(), model.id.clone());
-                    self.select_model(&provider, &id);
-                }
-            }
-            Some(ActiveModal::QuickSwitcher) => {
-                let rows = switch_rows(self);
-                if let Some(row) =
-                    rows.get(self.modal_selected_idx.min(rows.len().saturating_sub(1)))
-                {
-                    row.target.activate(self);
-                }
-            }
-            Some(ActiveModal::SettingsAuth) | None => {}
         }
     }
 }

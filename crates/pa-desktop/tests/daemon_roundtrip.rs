@@ -465,6 +465,57 @@ fn return_in_the_composer_sends_the_prompt_and_displays_the_reply() {
 }
 
 #[test]
+fn choose_model_and_reasoning_before_sending_the_first_prompt() {
+    let daemon = IsolatedDaemon::spawn();
+    // Register a local catalog only. Switching models and effort never needs a completion.
+    let catalog = serde_json::json!({"providers": {"fixture": {
+        "api": "openai-completions", "baseUrl": "http://127.0.0.1:9/v1", "apiKey": "fixture",
+        "models": [
+            {"id": "writer", "name": "Fixture Writer", "reasoning": false},
+            {"id": "planner", "name": "Fixture Planner", "reasoning": true,
+             "thinkingLevelMap": {"off":null,"minimal":null,"low":"low","medium":"medium","high":"high"}}
+        ]
+    }}});
+    std::fs::write(daemon.agent_dir.join("models.json"), catalog.to_string()).unwrap();
+    let settings = serde_json::json!({"defaultProvider":"fixture","defaultModel":"writer","defaultThinkingLevel":"low"});
+    std::fs::write(daemon.agent_dir.join("settings.json"), settings.to_string()).unwrap();
+    let mut desktop = daemon.open_workspace(&daemon.agent_dir);
+    wait_for_workspace(&mut desktop, |w| w.daemon_connected);
+    assert!(desktop.state.session.active_session_id.is_empty());
+    click(&mut desktop, "composer-input");
+    press(&mut desktop, Key::Text("Unsent plan".into()));
+    click(&mut desktop, "composer-model-pill");
+    wait_for_workspace(&mut desktop, |w| {
+        w.catalog_models
+            .iter()
+            .any(|m| m.provider == "fixture" && m.id == "planner")
+            && w.model_picker_ready()
+    });
+    click(&mut desktop, "modal-search");
+    press(&mut desktop, Key::Text("Fixture Planner".into()));
+    press(&mut desktop, Key::Enter);
+    wait_for_workspace(&mut desktop, |w| {
+        w.session.model_provider.as_deref() == Some("fixture")
+            && w.session.model_id.as_deref() == Some("planner")
+            && w.model_picker_ready()
+    });
+    let session_id = desktop.state.session.active_session_id.clone();
+    click(&mut desktop, "composer-effort-pill");
+    assert!(desktop.find("reasoning-level-high").is_some());
+    assert!(desktop.find("reasoning-level-max").is_none());
+    click(&mut desktop, "reasoning-level-high");
+    wait_for_workspace(&mut desktop, |w| {
+        w.session.thinking_level == "high" && w.model_picker_ready()
+    });
+    assert_eq!(desktop.state.session.active_session_id, session_id);
+    assert_eq!(desktop.state.composer_input.text, "Unsent plan");
+    assert!(!desktop.state.session.entries.iter().any(|e| matches!(
+        e,
+        TranscriptEntry::User { .. } | TranscriptEntry::Assistant { .. }
+    )));
+}
+
+#[test]
 fn project_new_chat_preserves_drafts_without_creating_sessions() {
     let daemon = IsolatedDaemon::spawn();
     let first = &daemon.work_dir;

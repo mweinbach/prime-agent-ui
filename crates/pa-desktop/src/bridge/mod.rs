@@ -105,11 +105,13 @@ pub enum BridgeRequest {
         active_session_id: String,
     },
     SetModel {
+        request_id: uuid::Uuid,
         active_session_id: String,
         provider: String,
         model_id: String,
     },
     SetThinkingLevel {
+        request_id: uuid::Uuid,
         active_session_id: String,
         level: String,
     },
@@ -280,6 +282,11 @@ pub enum BridgeEvent {
     AttachRedirect {
         requested: String,
         actual: String,
+    },
+    ModelSettingFinished {
+        active_session_id: String,
+        request_id: uuid::Uuid,
+        state: std::result::Result<Value, String>,
     },
     ModelCatalogLoaded {
         active_session_id: String,
@@ -754,6 +761,19 @@ async fn run_worker_loop(
                         | BridgeRequest::CreateSession { .. }
                         | BridgeRequest::OpenSavedSession { .. }
                 );
+                let model_setting = match &other {
+                    BridgeRequest::SetModel {
+                        active_session_id,
+                        request_id,
+                        ..
+                    }
+                    | BridgeRequest::SetThinkingLevel {
+                        active_session_id,
+                        request_id,
+                        ..
+                    } => Some((active_session_id.clone(), *request_id)),
+                    _ => None,
+                };
                 let client = active_client.clone();
                 let tx = evt_tx.clone();
                 tasks.spawn(async move {
@@ -763,14 +783,22 @@ async fn run_worker_loop(
                     };
                     if let Err(error) = outcome {
                         let message = format!("{error:#}");
-                        let _ = tx.unbounded_send(if transition {
-                            BridgeEvent::SessionTransitionFailed { message }
-                        } else {
-                            BridgeEvent::Toast {
-                                message,
-                                is_error: true,
-                            }
-                        });
+                        let _ = tx.unbounded_send(
+                            if let Some((active_session_id, request_id)) = model_setting {
+                                BridgeEvent::ModelSettingFinished {
+                                    active_session_id,
+                                    request_id,
+                                    state: Err(message),
+                                }
+                            } else if transition {
+                                BridgeEvent::SessionTransitionFailed { message }
+                            } else {
+                                BridgeEvent::Toast {
+                                    message,
+                                    is_error: true,
+                                }
+                            },
+                        );
                     }
                 });
             }
@@ -1165,6 +1193,7 @@ async fn dispatch_request(
             )?;
         }
         BridgeRequest::SetModel {
+            request_id,
             active_session_id,
             provider,
             model_id,
@@ -1183,13 +1212,10 @@ async fn dispatch_request(
                     )
                     .await?,
             )?;
-            hydrate_session_state(client, &active_session_id, evt_tx).await;
-            let _ = evt_tx.unbounded_send(BridgeEvent::Toast {
-                message: format!("Switched model to {provider}/{model_id}"),
-                is_error: false,
-            });
+            report_model_setting(client, active_session_id, request_id, evt_tx).await?;
         }
         BridgeRequest::SetThinkingLevel {
+            request_id,
             active_session_id,
             level,
         } => {
@@ -1206,7 +1232,7 @@ async fn dispatch_request(
                     )
                     .await?,
             )?;
-            hydrate_session_state(client, &active_session_id, evt_tx).await;
+            report_model_setting(client, active_session_id, request_id, evt_tx).await?;
         }
         BridgeRequest::SetAutoCompaction {
             active_session_id,
@@ -1342,7 +1368,7 @@ async fn dispatch_request(
             )?;
         }
         BridgeRequest::RefreshInspector { active_session_id } => {
-            if let Ok(resp) = client
+            let response = client
                 .request(
                     DaemonCommand::GetModelCatalog {
                         id: None,
@@ -1351,15 +1377,15 @@ async fn dispatch_request(
                     },
                     std_timeout,
                 )
-                .await
-                && resp.success
-                && let Some(data) = resp.data
-            {
-                let _ = evt_tx.unbounded_send(BridgeEvent::ModelCatalogLoaded {
-                    active_session_id: active_session_id.clone(),
-                    data,
-                });
-            }
+                .await;
+            let data = response
+                .ok()
+                .filter(|resp| resp.success)
+                .and_then(|resp| resp.data);
+            let _ = evt_tx.unbounded_send(BridgeEvent::ModelCatalogLoaded {
+                active_session_id: active_session_id.clone(),
+                data: data.unwrap_or(Value::Null),
+            });
             load_inspector_snapshot(client, &active_session_id, evt_tx).await;
         }
         BridgeRequest::TailShell {
@@ -1772,32 +1798,32 @@ async fn attach_and_hydrate(
     Ok(())
 }
 
-async fn hydrate_session_state(
+/// The daemon can clamp reasoning when either setting changes. Read back the
+/// effective model and effort together before allowing another picker write.
+async fn report_model_setting(
     client: &RawClient,
-    active_session_id: &str,
+    active_session_id: String,
+    request_id: uuid::Uuid,
     evt_tx: &futures_mpsc::UnboundedSender<BridgeEvent>,
-) {
-    if let Ok(resp) = client
+) -> Result<()> {
+    let response = client
         .request(
             DaemonCommand::GetState {
                 id: None,
-                active_session_id: active_session_id.to_string(),
+                active_session_id: active_session_id.clone(),
                 rest: Map::new(),
             },
             Duration::from_secs(10),
         )
         .await
-        && resp.success
-        && let Some(state_val) = resp.data
-    {
-        let _ = evt_tx.unbounded_send(BridgeEvent::SessionEvent {
-            active_session_id: active_session_id.to_string(),
-            event: json!({
-                "type": "desktop_state_sync",
-                "state": state_val,
-            }),
-        });
-    }
+        .context("Selection applied, but the updated session could not be read")?;
+    let state = check_daemon_ok(response)?;
+    let _ = evt_tx.unbounded_send(BridgeEvent::ModelSettingFinished {
+        active_session_id,
+        request_id,
+        state: Ok(state),
+    });
+    Ok(())
 }
 
 #[cfg(test)]

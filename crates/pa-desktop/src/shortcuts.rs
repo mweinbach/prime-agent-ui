@@ -54,8 +54,8 @@ const BINDINGS: &[Binding] = &[
     Binding::new(SESSION, "Select Model…", 'm', |s, _| {
         s.open_modal(ActiveModal::ModelPicker);
     }),
-    Binding::new(SESSION, "Cycle Thinking Effort", 'e', |s, _| {
-        s.cycle_thinking_level();
+    Binding::new(SESSION, "Choose Reasoning Effort…", 'e', |s, _| {
+        s.open_reasoning_picker();
     })
     .shifted(),
     Binding::new(SESSION, "Side Question (/btw)", '/', |s, _| {

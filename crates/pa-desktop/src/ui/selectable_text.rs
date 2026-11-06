@@ -18,7 +18,7 @@ pub(super) fn control(key: &str, title: &str, p: Palette) -> El {
         .focusable(true)
         .cursor(Cursor::Pointer)
         .preserve_focus_on_press(true)
-        .focus_ring(1., 1., p.accent)
+        .focus_ring(1.5, 1., p.text_secondary)
         .hover(p.bg_hover)
         .press(p.bg_selected)
         .center()

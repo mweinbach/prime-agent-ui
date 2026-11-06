@@ -7,6 +7,7 @@ mod dialogs;
 mod interaction_tests;
 mod interactions;
 mod layout;
+mod model_picker;
 mod projects;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -96,6 +97,7 @@ pub struct PrimeDesktopView {
     /// A sidebar filter, independent of the conversation open in the stage.
     pub(super) sidebar_project: Option<String>,
     pub(super) sidebar_history_open: bool,
+    pub(super) sidebar_focused_action: Option<String>,
 
     pub session: AttachedSessionState,
     selection: SessionSelection,
@@ -106,6 +108,9 @@ pub struct PrimeDesktopView {
     pub catalog_models: Vec<CatalogModel>,
     pub configured_providers: HashSet<String>,
     pub model_picker_configured_only: bool,
+    pub(in crate::ui) reasoning_picker_open: bool,
+    pending_model_setting: Option<uuid::Uuid>,
+    catalog_loaded: bool,
 
     pub rlm_children: Subagents,
     pub rlm_max_depth: Option<u64>,
@@ -127,6 +132,7 @@ pub struct PrimeDesktopView {
 
     pub active_modal: Option<ActiveModal>,
     pub(super) modal_selected_idx: usize,
+    pub(super) modal_model_key: Option<(String, String)>,
     pub(super) slash_selected_idx: usize,
     pub renaming_session: bool,
     pub agent_mail_target: Option<String>,
@@ -227,6 +233,7 @@ impl PrimeDesktopView {
             saved_next_cursor: None,
             sidebar_project: None,
             sidebar_history_open: false,
+            sidebar_focused_action: None,
             session: AttachedSessionState::default(),
             selection: SessionSelection::Idle,
             auto_attach,
@@ -236,6 +243,9 @@ impl PrimeDesktopView {
             catalog_models: Vec::new(),
             configured_providers: HashSet::new(),
             model_picker_configured_only: false,
+            reasoning_picker_open: false,
+            pending_model_setting: None,
+            catalog_loaded: false,
             rlm_children: Subagents::default(),
             rlm_max_depth: None,
             shells: Vec::new(),
@@ -253,6 +263,7 @@ impl PrimeDesktopView {
             selected_auth_provider: "prime-inference".to_string(),
             active_modal: options.initial_modal,
             modal_selected_idx: 0,
+            modal_model_key: None,
             slash_selected_idx: 0,
             renaming_session: false,
             agent_mail_target: None,
@@ -294,6 +305,7 @@ impl PrimeDesktopView {
                 }
                 self.daemon_connected = connected;
                 if !connected {
+                    self.reasoning_picker_open = false;
                     self.stash_draft();
                     self.reset_session();
                     self.restore_draft();
@@ -305,6 +317,12 @@ impl PrimeDesktopView {
                 }
                 self.daemon_socket_display = socket_path.to_string_lossy().to_string();
                 self.daemon_version = daemon_version;
+                if connected
+                    && (self.reasoning_picker_open
+                        || self.active_modal == Some(ActiveModal::ModelPicker))
+                {
+                    self.prepare_model_catalog();
+                }
                 if let Some(err) = error {
                     self.toast = Some((err, true));
                 }
@@ -380,6 +398,7 @@ impl PrimeDesktopView {
                 }
             }
             BridgeEvent::SessionTransitionFailed { message } => {
+                self.reasoning_picker_open = false;
                 self.selection = SessionSelection::Idle;
                 self.restore_draft();
                 self.toast = Some((message, true));
@@ -481,6 +500,7 @@ impl PrimeDesktopView {
                         if let Some(st) = event.get("state") {
                             self.session.apply_state_object(st);
                             self.telemetry.update_from_state(st);
+                            self.validate_reasoning_picker();
                         }
                     } else {
                         let etype = event
@@ -520,11 +540,30 @@ impl PrimeDesktopView {
                 self.active_sessions
                     .retain(|s| s.active_session_id != active_session_id);
                 if self.session.active_session_id == active_session_id {
+                    self.reasoning_picker_open = false;
                     self.stash_draft();
                     self.reset_session();
                     self.restore_draft();
                     self.selection = SessionSelection::Idle;
                     self.toast = Some((format!("Session closed ({reason})"), false));
+                }
+            }
+            BridgeEvent::ModelSettingFinished {
+                active_session_id,
+                request_id,
+                state,
+            } => {
+                if self.pending_model_setting == Some(request_id)
+                    && self.session.active_session_id == active_session_id
+                {
+                    self.pending_model_setting = None;
+                    match state {
+                        Ok(state) => {
+                            self.session.apply_state_object(&state);
+                            self.telemetry.update_from_state(&state);
+                        }
+                        Err(error) => self.toast = Some((error, true)),
+                    }
                 }
             }
             BridgeEvent::ModelCatalogLoaded {
@@ -534,9 +573,13 @@ impl PrimeDesktopView {
                 if self.session.active_session_id != active_session_id {
                     return;
                 }
-                let (models, providers) = parse_model_catalog(&data);
-                self.catalog_models = models;
-                self.configured_providers = providers;
+                self.catalog_loaded = true;
+                if !data.is_null() {
+                    let (models, providers) = parse_model_catalog(&data);
+                    self.catalog_models = models;
+                    self.configured_providers = providers;
+                }
+                self.validate_reasoning_picker();
             }
             BridgeEvent::SubagentUpdated {
                 active_session_id,
@@ -639,6 +682,8 @@ impl PrimeDesktopView {
         self.scroll_to_tail = false;
         self.session = AttachedSessionState::default();
         self.telemetry = SessionTelemetry::default();
+        self.pending_model_setting = None;
+        self.catalog_loaded = false;
         self.catalog_models.clear();
         self.configured_providers.clear();
         self.rlm_children = Subagents::default();
@@ -653,6 +698,8 @@ impl PrimeDesktopView {
         self.harness_editor_open = false;
         self.harness_editing_id = None;
         self.store_request += 1;
+        self.harness_scope = HarnessScope::Global;
+        self.harness_kind_filter = None;
         self.harness.local_dir = None;
         self.harness.local_entries.clear();
         self.harness.history.clear();
@@ -670,6 +717,7 @@ impl PrimeDesktopView {
         if !self.ready_for_request() {
             return;
         }
+        self.reasoning_picker_open = false;
         self.auto_attach = false;
         self.selection = match &request {
             BridgeRequest::AttachSession { active_session_id } => {
@@ -693,6 +741,8 @@ impl PrimeDesktopView {
             "Not connected. Use Refresh to reconnect."
         } else if !matches!(self.selection, SessionSelection::Idle) {
             "Opening the session. Wait before sending another request."
+        } else if self.model_setting_pending() {
+            "Applying the selection. Wait before sending another request."
         } else {
             return true;
         };
@@ -938,6 +988,7 @@ impl PrimeDesktopView {
 
             return;
         }
+        self.reasoning_picker_open = false;
         self.prefs.daemon_target = self.prefs.daemon_target.toggled();
         self.save_preferences();
         self.daemon_connected = false;
@@ -975,30 +1026,15 @@ impl PrimeDesktopView {
     }
 
     pub fn open_modal(&mut self, modal: ActiveModal) {
-        if modal == ActiveModal::ModelPicker
-            && self.session.active_session_id.is_empty()
-            && self.daemon_connected
-            && matches!(self.selection, SessionSelection::Idle)
-        {
-            self.open_session(BridgeRequest::CreateSession {
-                cwd: self.working_cwd.clone(),
-                name: None,
-                initial_prompt: None,
-                images: Vec::new(),
-            });
-        }
-        if modal == ActiveModal::ModelPicker
-            && self.catalog_models.is_empty()
-            && !self.session.active_session_id.is_empty()
-        {
-            self.bridge.send(BridgeRequest::RefreshInspector {
-                active_session_id: self.session.active_session_id.clone(),
-            });
+        self.reasoning_picker_open = false;
+        if modal == ActiveModal::ModelPicker {
+            self.prepare_model_catalog();
         }
         if modal == ActiveModal::SettingsAuth {
             self.reload_local_stores();
         }
         self.modal_selected_idx = 0;
+        self.modal_model_key = None;
         self.active_modal = Some(modal);
         self.modal_search_input.replace_text("");
         self.focus_active_surface();
@@ -1012,17 +1048,6 @@ impl PrimeDesktopView {
         self.active_modal = None;
         self.api_key_input.replace_text("");
         self.focus_active_surface();
-    }
-
-    pub fn select_model(&mut self, provider: &str, model_id: &str) {
-        if !self.session.active_session_id.is_empty() {
-            self.bridge.send(BridgeRequest::SetModel {
-                active_session_id: self.session.active_session_id.clone(),
-                provider: provider.to_string(),
-                model_id: model_id.to_string(),
-            });
-        }
-        self.close_modal();
     }
 
     pub fn execute_palette_action(&mut self, action_id: &str) {

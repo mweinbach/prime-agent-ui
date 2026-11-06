@@ -15,13 +15,12 @@ pub(super) fn control(key: impl Into<String>, title: impl Into<String>, p: Palet
     let title = title.into();
     el().key(key)
         .role("button")
-        .label(title.clone())
-        .help(title)
+        .label(title)
         .focusable(true)
         .cursor(Cursor::Pointer)
         .hover(p.bg_hover)
         .press(p.bg_selected)
-        .focus_ring(1.5, 0.0, p.accent)
+        .focus_ring(1.5, 0.0, p.text_secondary)
         .radius(6.0)
 }
 
@@ -31,7 +30,9 @@ pub(super) fn icon_button(
     icon: Icon,
     p: Palette,
 ) -> El {
-    control(key, title, p)
+    let title = title.into();
+    control(key, title.clone(), p)
+        .help(title)
         .size(26.0, 26.0)
         .center()
         .child(icon.render(14.0, p.text_secondary))

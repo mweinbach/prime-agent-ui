@@ -5,7 +5,7 @@ mod rows;
 #[cfg(test)]
 mod tests;
 
-use rune::{Cx, El, col, el, row};
+use rune::{Cx, El, Key, col, el, row};
 
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
@@ -14,6 +14,18 @@ use crate::theme::{Palette, ThemeMode};
 use crate::ui::panel_controls::{button, control, icon_button, label};
 use crate::ui::text_input::field;
 use crate::ui::workspace::PrimeDesktopView;
+
+/// Rune reports the full element key on key release, including slashes in a folder path.
+fn is_row_action(key: &str) -> bool {
+    [
+        "project-pin-",
+        "project-new-chat-",
+        "kill-active-",
+        "del-saved-",
+    ]
+    .iter()
+    .any(|prefix| key.starts_with(prefix))
+}
 
 pub(super) const SIDEBAR_WIDTH: f32 = 264.0;
 pub(super) const GLOBAL_SEARCH: &str = "Search projects and chats";
@@ -69,17 +81,18 @@ impl PrimeDesktopView {
         let compose = control("sidebar-compose", "New chat", p)
             .h(36.0)
             .w_full()
-            .radius(9.0)
+            .radius(7.0)
             .px(11.0)
             .center_y()
             .gap(9.0)
-            .fill(p.accent_soft)
-            .press(p.bg_selected)
-            .child(Icon::Compose.render(15.0, p.accent))
+            .fill(p.bg_elevated)
+            .border(1.0, p.border_subtle)
+            .press(p.bg_hover)
+            .child(Icon::Compose.render(15.0, p.text_secondary))
             .child(label("New chat", 13.5, 600.0, p.text_primary).grow(1.0))
             .child(label(shortcut, 10.5, 500.0, p.text_secondary))
             .on_press(Self::start_fresh_session);
-        let mut toolbar = row().h(35.0).center_y().pl(15.0).pr(12.0).gap(5.0);
+        let mut toolbar = row().h(34.0).center_y().pl(15.0).pr(12.0).gap(5.0);
         if scope.is_some() {
             toolbar = toolbar.child(
                 icon_button("sidebar-all-projects", "All projects", Icon::ChevronLeft, p)
@@ -109,18 +122,17 @@ impl PrimeDesktopView {
                     p,
                 )
             } else {
-                icon_button("add-project", "Add project", Icon::FolderPlus, p)
+                icon_button("add-project", "Add project", Icon::Plus, p)
                     .size(23.0, 24.0)
                     .on_press(Self::prompt_choose_project_dir)
             });
         let mut search = row()
             .h(30.0)
-            .px(7.0)
-            .gap(5.0)
+            .px(8.0)
+            .gap(7.0)
             .center_y()
             .radius(6.0)
-            .fill(p.bg_canvas)
-            .border(1.0, p.border_subtle)
+            .hover(p.bg_hover)
             .child(Icon::Search.render(14.0, p.text_muted))
             .child(
                 field(
@@ -151,12 +163,23 @@ impl PrimeDesktopView {
 
         let mut sidebar = col()
             .key("sidebar")
+            .on_key_up(|s: &mut Self, event, tx| {
+                if event.key != Key::Tab {
+                    return false;
+                }
+                let action = tx.focused().filter(|key| is_row_action(key));
+                if action == s.sidebar_focused_action.as_deref() {
+                    return false;
+                }
+                s.sidebar_focused_action = action.map(str::to_owned);
+                true
+            })
             .w(SIDEBAR_WIDTH)
             .h_full()
             .min_h(0.0)
             .fill(p.bg_sidebar)
             .child(top)
-            .child(col().px(12.0).gap(7.0).pb(7.0).child(compose).child(search))
+            .child(col().px(12.0).gap(3.0).pb(9.0).child(compose).child(search))
             .child(toolbar)
             .child(outline::render(self, p));
         if let Some(cursor) = &self.saved_next_cursor {
@@ -209,8 +232,6 @@ impl PrimeDesktopView {
                     .on_press(Self::refresh_all),
             )
             .child(icon_button("toggle-theme-btn", hint, icon, p).on_press(Self::toggle_theme));
-        sidebar
-            .child(el().h(1.0).fill(p.border_subtle))
-            .child(footer)
+        sidebar.child(footer)
     }
 }

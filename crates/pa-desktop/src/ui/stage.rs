@@ -223,8 +223,7 @@ impl PrimeDesktopView {
             right = right
                 .child(
                     control("stage-detail-pill", "Change transcript detail", p)
-                        .radius(8.)
-                        .border(1., p.border_subtle)
+                        .radius(6.)
                         .child(label(
                             self.prefs.detail_level.label(),
                             12.,
@@ -234,8 +233,7 @@ impl PrimeDesktopView {
                 )
                 .child(
                     control("stage-side-question-btn", "Side question", p)
-                        .radius(8.)
-                        .border(1., p.border_subtle)
+                        .radius(6.)
                         .child(label("/btw", 12., p.text_secondary))
                         .on_press(Self::toggle_side_question),
                 );
@@ -253,9 +251,8 @@ impl PrimeDesktopView {
             );
         }
         let inspect = control("stage-toggle-inspector-btn", "Toggle inspector", p)
-            .radius(8.)
-            .px(9.)
-            .border(1., p.border_subtle)
+            .radius(6.)
+            .px(8.)
             .child(Icon::Layers.render(14., p.text_secondary))
             .child(label("Inspector", 12., p.text_secondary))
             .on_press(Self::toggle_inspector);
@@ -281,25 +278,16 @@ impl PrimeDesktopView {
     }
 
     fn welcome(&self, p: Palette, cx: &Cx<Self>) -> El {
-        let mark = row()
-            .key("welcome-mark")
-            .size(44., 44.)
-            .radius(13.)
-            .fill(p.accent_soft)
-            .center()
-            .child(Icon::Prime.render(28., p.accent));
-        let heading = col().w_full().items_start().gap(15.).child(mark).child(
-            text("What are we working on?")
-                .font(
-                    TextStyle::new(39., 480.)
-                        .family(Family::Named(font_display()))
-                        .lh(46.)
-                        .tracking(-1.3),
-                )
-                .color(p.text_primary)
-                .min_w(0.)
-                .wrap(),
-        );
+        let heading = text("What are we working on?")
+            .font(
+                TextStyle::new(39., 480.)
+                    .family(Family::Named(font_display()))
+                    .lh(46.)
+                    .tracking(-1.3),
+            )
+            .color(p.text_primary)
+            .min_w(0.)
+            .wrap();
         let mut starters = row().min_h(32.).gap(8.).flex_wrap();
         if self.composer_input.text.is_empty() && self.staged_images.is_empty() {
             for (key, icon, title, prompt) in [
@@ -322,9 +310,8 @@ impl PrimeDesktopView {
                         .px(11.)
                         .gap(7.)
                         .radius(10.)
-                        .border(1., p.border_strong)
-                        .child(icon.render(15., p.accent))
-                        .child(label(title, 13., p.text_primary))
+                        .child(icon.render(14., p.text_muted))
+                        .child(label(title, 12.5, p.text_secondary))
                         .on_press(move |s: &mut Self| s.populate_draft(prompt)),
                 );
             }
@@ -474,7 +461,7 @@ impl PrimeDesktopView {
                     .gap(6.);
                 if !text.is_empty() {
                     line = line.child(
-                        copy_button(&format!("{key}-copy"), text, p).group_opacity(0.32, 1.),
+                        copy_button(&format!("{key}-copy"), text, p).group_opacity(0.22, 1.),
                     );
                 }
                 col().w_full().items_end().child(line.child(bubble))
@@ -531,19 +518,13 @@ impl PrimeDesktopView {
                     message =
                         message.child(label(error, 13., p.danger).wrap_anywhere().selectable(true));
                 }
-                let mut author = row()
-                    .w_full()
-                    .items_center()
-                    .gap(7.)
-                    .child(Icon::Prime.render(15., p.accent))
-                    .child(
-                        label("Prime Agent", 12.5, p.text_secondary)
-                            .font(TextStyle::new(12.5, 600.)),
-                    );
+                let mut author = row().w_full().items_center().gap(7.).child(
+                    label("Prime Agent", 12.5, p.text_secondary).font(TextStyle::new(12.5, 600.)),
+                );
                 if !reply.is_empty() && !streaming {
                     author = author.child(el().grow(1.)).child(
                         copy_button(&format!("{key}-copy"), &reply.join("\n\n"), p)
-                            .group_opacity(0.4, 1.),
+                            .group_opacity(0.28, 1.),
                     );
                 }
                 col()

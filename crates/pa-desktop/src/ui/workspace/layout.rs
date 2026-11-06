@@ -89,6 +89,9 @@ impl PrimeDesktopView {
                 );
             }
         }
+        if let Some(picker) = self.reasoning_picker(p) {
+            root = root.child(picker);
+        }
         if let Some(modal) = self.active_modal(cx) {
             root = root.child(modal);
         } else if let Some(toast) = self.notification(p) {

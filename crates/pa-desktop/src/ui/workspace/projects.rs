@@ -85,6 +85,7 @@ impl PrimeDesktopView {
             return;
         }
         self.close_sidebar_overlay();
+        self.reasoning_picker_open = false;
         self.auto_attach = false;
         self.stash_draft();
         self.reset_session();

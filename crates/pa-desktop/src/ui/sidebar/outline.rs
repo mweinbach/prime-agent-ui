@@ -47,7 +47,21 @@ fn append_folder(
             return;
         }
     }
-    rows.extend((0..group.draft_cwds.len()).map(|index| OutlineRow::Draft { group: i, index }));
+    let empty_composer = view.session.active_session_id.is_empty()
+        && view.composer_input.text.is_empty()
+        && view.staged_images.is_empty();
+    rows.extend(
+        group
+            .draft_cwds
+            .iter()
+            .enumerate()
+            .filter_map(|(index, cwd)| {
+                // The fresh composer already belongs to the selected project. The outline
+                // lists conversations and recoverable drafts, including drafts in subfolders.
+                (!empty_composer || cwd != &view.working_cwd)
+                    .then_some(OutlineRow::Draft { group: i, index })
+            }),
+    );
     if scoped || searching || group.folder().is_none() || group.chats.len() <= PREVIEW_CHATS {
         rows.extend(group.chats.iter().copied().map(OutlineRow::Chat));
     } else {
@@ -122,27 +136,29 @@ impl OutlineRow {
         p: Palette,
         searching: bool,
     ) -> El {
+        let focused = view.sidebar_focused_action.as_deref();
         match self {
             Self::Folder(i) => rows::project(
                 &groups[i],
                 groups[i].folder() == Some(view.current_project()),
                 searching,
+                focused,
                 p,
             ),
-            Self::Chat(chat @ ProjectChat::Live(i)) => {
-                rows::live_chat(&view.active_sessions[i], is_selected(view, chat), p)
-            }
+            Self::Chat(chat @ ProjectChat::Live(i)) => rows::live_chat(
+                &view.active_sessions[i],
+                is_selected(view, chat),
+                focused,
+                p,
+            ),
             Self::Chat(chat @ ProjectChat::Saved(i)) => {
-                rows::saved_chat(&view.saved_sessions[i], is_selected(view, chat), p)
+                rows::saved_chat(&view.saved_sessions[i], is_selected(view, chat), focused, p)
             }
             Self::Draft { group, index } => {
                 let group = &groups[group];
                 let cwd = group.draft_cwds[index].clone();
                 let selected = view.session.active_session_id.is_empty() && view.working_cwd == cwd;
-                let blank = selected
-                    && view.composer_input.text.is_empty()
-                    && view.staged_images.is_empty();
-                let name = if blank { "New chat" } else { "Unsent draft" };
+                let name = "Unsent draft";
                 let suffix = group
                     .folder()
                     .and_then(|root| std::path::Path::new(&cwd).strip_prefix(root).ok())

@@ -192,7 +192,9 @@ impl PrimeDesktopView {
         if self.confirm.take().is_some() {
             return true;
         }
-        if self.active_modal.is_some() {
+        if self.reasoning_picker_open {
+            self.close_reasoning_picker();
+        } else if self.active_modal.is_some() {
             self.close_modal();
         } else if self.prefs.inspector_open && width < INSPECTOR_BREAKPOINT {
             self.toggle_inspector();
@@ -221,24 +223,6 @@ impl PrimeDesktopView {
             return false;
         }
         true
-    }
-
-    pub fn cycle_thinking_level(&mut self) {
-        if self.session.active_session_id.is_empty() {
-            return;
-        }
-        let model = self.catalog_models.iter().find(|model| {
-            self.session.model_provider.as_deref() == Some(&model.provider)
-                && self.session.model_id.as_deref() == Some(&model.id)
-        });
-        if let Some(level) =
-            model.and_then(|model| model.next_thinking_level(&self.session.thinking_level))
-        {
-            self.bridge.send(BridgeRequest::SetThinkingLevel {
-                active_session_id: self.session.active_session_id.clone(),
-                level: level.to_owned(),
-            });
-        }
     }
 
     pub(crate) fn close_sidebar_overlay(&mut self) {

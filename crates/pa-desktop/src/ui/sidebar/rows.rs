@@ -33,7 +33,13 @@ pub(super) fn project_pin(cwd: &str, pinned: bool, p: Palette) -> El {
         })
 }
 
-pub(super) fn project(group: &ProjectGroup, current: bool, searching: bool, p: Palette) -> El {
+pub(super) fn project(
+    group: &ProjectGroup,
+    current: bool,
+    searching: bool,
+    focused: Option<&str>,
+    p: Palette,
+) -> El {
     let key = group.key().to_owned();
     let mut heading = row()
         .hover_group()
@@ -74,12 +80,17 @@ pub(super) fn project(group: &ProjectGroup, current: bool, searching: bool, p: P
         .center_y()
         .gap(5.0)
         .radius(5.0)
-        .child(folder_icon.render(14.0, if current { p.accent } else { p.text_muted }))
+        .child(folder_icon.render(14.0, p.text_secondary))
         .child(
-            label(&group.label, 12.5, 500.0, p.text_primary)
-                .grow(1.0)
-                .min_w(0.0)
-                .truncate(),
+            label(
+                &group.label,
+                13.0,
+                if current { 600.0 } else { 500.0 },
+                p.text_primary,
+            )
+            .grow(1.0)
+            .min_w(0.0)
+            .truncate(),
         );
     if let Some(path) = group.folder() {
         let path = path.to_owned();
@@ -102,16 +113,25 @@ pub(super) fn project(group: &ProjectGroup, current: bool, searching: bool, p: P
     heading = heading.child(title);
     if let Some(path) = group.folder() {
         let path = path.to_owned();
+        let pin_key = format!("project-pin-{path}");
+        let new_key = format!("project-new-chat-{path}");
         heading = heading
-            .child(project_pin(&path, group.added, p).group_opacity(0.38, 1.0))
+            .child(row_action(
+                project_pin(&path, group.added, p),
+                focused,
+                &pin_key,
+            ))
             .child(
-                icon_button(
-                    format!("project-new-chat-{path}"),
-                    format!("New chat in {}", group.label),
-                    Icon::Compose,
-                    p,
+                row_action(
+                    icon_button(
+                        new_key.clone(),
+                        format!("New chat in {}", group.label),
+                        Icon::Compose,
+                        p,
+                    ),
+                    focused,
+                    &new_key,
                 )
-                .group_opacity(0.38, 1.0)
                 .size(22.0, 24.0)
                 .on_press(move |s: &mut PrimeDesktopView| s.new_project_chat(&path)),
             );
@@ -126,12 +146,17 @@ pub(super) fn project(group: &ProjectGroup, current: bool, searching: bool, p: P
     heading
 }
 
+fn row_action(button: El, focused: Option<&str>, key: &str) -> El {
+    let rest = if focused == Some(key) { 1.0 } else { 0.0 };
+    button.group_opacity(rest, 1.0)
+}
+
 pub(super) fn chat(key: String, title: &str, icon: El, selected: bool, p: Palette) -> El {
     let mut item = control(key, title, p)
         .grow(1.0)
         .min_w(0.0)
         .h(ROW_HEIGHT)
-        .pl(23.0)
+        .pl(32.0)
         .center_y()
         .child(
             row()
@@ -157,20 +182,21 @@ pub(super) fn chat(key: String, title: &str, icon: El, selected: bool, p: Palett
                 ),
         );
     if selected {
-        item = item.fill(p.bg_selected).child(
-            el().size(2.5, 14.0)
-                .absolute(3.0, 8.0)
-                .radius(1.25)
-                .fill(p.accent),
-        );
+        item = item.fill(p.text_primary.alpha(0.07));
     }
     item
 }
 
-pub(super) fn live_chat(agent: &ActiveSessionRow, selected: bool, p: Palette) -> El {
+pub(super) fn live_chat(
+    agent: &ActiveSessionRow,
+    selected: bool,
+    focused: Option<&str>,
+    p: Palette,
+) -> El {
     let sid = agent.active_session_id.clone();
     let id = sid.clone();
     let name = agent.name.clone();
+    let stop_key = format!("kill-active-{id}");
     let marker = if agent.is_streaming {
         Icon::Zap.render(12.0, p.warning)
     } else {
@@ -196,28 +222,37 @@ pub(super) fn live_chat(agent: &ActiveSessionRow, selected: bool, p: Palette) ->
                 }),
         )
         .child(
-            icon_button(format!("kill-active-{id}"), "Stop session", Icon::Stop, p)
-                .group_opacity(0.38, 1.0)
-                .size(22.0, 24.0)
-                .on_press(move |s: &mut PrimeDesktopView| {
-                    let sid = id.clone();
-                    s.confirm(
-                        format!("Stop “{name}”? Its worker and any running turn will stop."),
-                        "Stop session",
-                        move |s| {
-                            s.bridge.send(BridgeRequest::KillSession {
-                                active_session_id: sid,
-                            });
-                        },
-                    );
-                }),
+            row_action(
+                icon_button(&stop_key, "Stop session", Icon::Stop, p),
+                focused,
+                &stop_key,
+            )
+            .size(22.0, 24.0)
+            .on_press(move |s: &mut PrimeDesktopView| {
+                let sid = id.clone();
+                s.confirm(
+                    format!("Stop “{name}”? Its worker and any running turn will stop."),
+                    "Stop session",
+                    move |s| {
+                        s.bridge.send(BridgeRequest::KillSession {
+                            active_session_id: sid,
+                        });
+                    },
+                );
+            }),
         )
 }
 
-pub(super) fn saved_chat(agent: &SavedSessionRow, selected: bool, p: Palette) -> El {
+pub(super) fn saved_chat(
+    agent: &SavedSessionRow,
+    selected: bool,
+    focused: Option<&str>,
+    p: Palette,
+) -> El {
     let path = agent.path.clone();
     let cwd = (!agent.cwd.is_empty()).then(|| agent.cwd.clone());
     let del = path.clone();
+    let delete_key = format!("del-saved-{del}");
     let title = agent.name.clone();
     let mut item = row().hover_group().h(ROW_HEIGHT).center_y().child(
         chat(
@@ -240,20 +275,23 @@ pub(super) fn saved_chat(agent: &SavedSessionRow, selected: bool, p: Palette) ->
         item = item.child(label(age, 10.0, 400.0, p.text_muted));
     }
     item.child(
-        icon_button(format!("del-saved-{del}"), "Delete chat", Icon::Trash, p)
-            .group_opacity(0.38, 1.0)
-            .size(22.0, 24.0)
-            .on_press(move |s: &mut PrimeDesktopView| {
-                let del = del.clone();
-                s.confirm(
-                    format!("Permanently delete “{title}” from saved chats?"),
-                    "Delete chat",
-                    move |s| {
-                        s.bridge
-                            .send(BridgeRequest::DeleteSavedSession { session_path: del });
-                    },
-                );
-            }),
+        row_action(
+            icon_button(&delete_key, "Delete chat", Icon::Trash, p),
+            focused,
+            &delete_key,
+        )
+        .size(22.0, 24.0)
+        .on_press(move |s: &mut PrimeDesktopView| {
+            let del = del.clone();
+            s.confirm(
+                format!("Permanently delete “{title}” from saved chats?"),
+                "Delete chat",
+                move |s| {
+                    s.bridge
+                        .send(BridgeRequest::DeleteSavedSession { session_path: del });
+                },
+            );
+        }),
     )
 }
 fn modified_age(modified: &str, now: OffsetDateTime) -> Option<String> {

@@ -77,8 +77,8 @@ PA_E2E_KERNEL_PYTHON="$HOME/.prime/agent/kernel-venv/bin/python" nice -n 10 carg
 | `⌘N` | New chat in the browsed project, or the current conversation’s project |
 | `⇧⌘O` | Add a project folder |
 | `⌘K` | Quick Switcher & command palette |
-| `⌘M` | Searchable Model Picker (Prime Inference, OpenAI Codex, Google Gemini, Anthropic, OpenAI) |
-| `⇧⌘E` | Cycle thinking effort (`off` -> `minimal` -> `low` -> `medium` -> `high` -> `xhigh`) |
+| `⌘M` | Find a model by name, ID, or provider |
+| `⇧⌘E` | Choose a reasoning level supported by the active model |
 | `⌘O` | Cycle transcript detail (`Overview` -> `Details` -> `All`) |
 | `⌘B` | Toggle the project sidebar |
 | `⌘I` | Toggle right Agentic Harness Studio drawer |

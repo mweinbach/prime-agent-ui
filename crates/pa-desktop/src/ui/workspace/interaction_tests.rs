@@ -108,6 +108,9 @@ fn search_and_completion_keys_act_on_the_highlighted_row() {
     key(&mut app, Key::Enter, false);
     assert_eq!(app.state.composer_input.text, "/model");
 
+    app.state.daemon_connected = true;
+    app.state.session.active_session_id = "picker-keyboard-fixture".into();
+    app.state.catalog_loaded = true;
     app.state.catalog_models = parse_model_catalog(&serde_json::json!({"models":[
         {"provider":"example","id":"one"}, {"provider":"example","id":"two"}]}))
     .0;

@@ -1,6 +1,8 @@
 //! Prompt editing, slash completion, staged attachments and live turn controls.
 
-use rune::{Cx, El, Key, KeyEvent, auto_grow, col, row};
+use rune::{
+    Align, Cursor, Cx, El, Key, KeyEvent, ScrollSpec, Side, TextStyle, auto_grow, col, el, row,
+};
 
 use super::selectable_text::{control, icon_control, label};
 use super::text_input::{LINE_HEIGHT, dismiss, field};
@@ -90,7 +92,7 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktop
     let border = if shell {
         p.warning
     } else if focused {
-        p.accent.mix(p.bg_elevated, 0.25)
+        p.text_muted.alpha(0.62)
     } else {
         p.border_strong
     };
@@ -104,9 +106,7 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktop
         .radius(19.)
         .border(1., border)
         .shadow(3., 10., rune::Color::BLACK.alpha(0.09));
-    if focused {
-        card = card.outline(2., 1., p.accent.alpha(0.09));
-    }
+
     if !view.staged_images.is_empty() {
         let mut attachments = row().flex_wrap().gap(6.);
         for (i, image) in view.staged_images.iter().enumerate() {
@@ -155,50 +155,62 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktop
     .on_submit(|s: &mut PrimeDesktopView, _| submit(s))
     .on_input_key(move |s: &mut PrimeDesktopView, event, _| composer_key(s, event, edge_lines));
 
+    let model = view.current_catalog_model();
+    let model_name = model
+        .map(|m| m.name.as_str())
+        .filter(|n| !n.is_empty())
+        .or(view.session.model_id.as_deref())
+        .unwrap_or("Select model");
+    let effort = view.session.thinking_level.as_str();
+    let has_choices = model.is_some_and(|m| m.supported_levels.len() > 1);
+    let reasoning = if model.is_some_and(|m| m.supported_levels.iter().any(|level| level == effort))
+    {
+        format!("{} reasoning", effort_name(effort))
+    } else {
+        "Reasoning".into()
+    };
+    let can_open = view.can_open_reasoning_picker();
+    let show_reasoning =
+        has_choices || (model.is_none() && (can_open || view.reasoning_picker_open));
     let mut tools = row()
         .min_w(0.)
         .items_center()
-        .gap(6.)
+        .gap(3.)
         .flex_wrap()
         .child(
-            control("composer-attach-img-btn", "Attach images", p)
-                .help("Attach images")
-                .size(32., 32.)
-                .padding(0.)
-                .radius(10.)
-                .border(1., p.border_strong)
-                .child(Icon::Plus.render(17., p.text_secondary))
+            icon_control("composer-attach-img-btn", "Attach images", Icon::Plus, p)
+                .size(30., 30.)
                 .on_press(PrimeDesktopView::prompt_attach_images),
         )
         .child(
             control("composer-model-pill", "Select model", p)
-                .h(32.)
-                .gap(6.)
-                .px(10.)
-                .radius(10.)
-                .fill(p.bg_sidebar)
-                .child(Icon::Cpu.render(13., p.text_secondary))
+                .h(30.)
+                .gap(5.)
+                .px(6.)
+                .help("Select model")
                 .child(
-                    label(
-                        view.session.model_id.as_deref().unwrap_or("Select model"),
-                        12.5,
-                        p.text_primary,
-                    )
-                    .truncate()
-                    .max_w(200.),
+                    label(model_name, 12.5, p.text_primary)
+                        .font(TextStyle::new(12.5, 550.))
+                        .max_w(200.)
+                        .min_w(0.)
+                        .truncate(),
                 )
-                .child(Icon::ChevronDown.render(12., p.text_muted))
+                .child(Icon::ChevronDown.render(11., p.text_muted))
                 .on_press(|s: &mut PrimeDesktopView| s.open_modal(ActiveModal::ModelPicker)),
         );
-    if !view.session.thinking_level.is_empty() {
+    if show_reasoning {
         tools = tools.child(
-            control("composer-effort-pill", "Change reasoning effort", p)
-                .child(label(
-                    format!("Effort: {}", view.session.thinking_level),
-                    12.,
-                    p.text_secondary,
-                ))
-                .on_press(PrimeDesktopView::cycle_thinking_level),
+            control("composer-effort-pill", "Reasoning effort", p)
+                .h(30.)
+                .gap(5.)
+                .px(6.)
+                .expanded(view.reasoning_picker_open)
+                .help("Choose reasoning effort")
+                .disabled(!can_open && !view.reasoning_picker_open)
+                .preserve_focus_on_press(false)
+                .child(label(reasoning, 12.5, p.text_secondary))
+                .child(Icon::ChevronDown.render(11., p.text_muted))
+                .on_press(PrimeDesktopView::open_reasoning_picker),
         );
     }
     if shell {
@@ -210,7 +222,11 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktop
         );
     }
     let mut actions = row().center_y().gap(4.);
-    if let Some(percent) = view.telemetry.context_percent {
+    if let Some(percent) = view
+        .telemetry
+        .context_percent
+        .filter(|percent| *percent >= 1.)
+    {
         actions = actions.child(label(format!("{percent:.0}% context"), 11.5, p.text_muted));
     }
     if view.session.is_streaming {
@@ -279,6 +295,112 @@ pub(super) fn composer(view: &PrimeDesktopView, p: Palette, cx: &Cx<PrimeDesktop
                 .child(actions),
         );
     section.child(card)
+}
+
+fn effort_name(level: &str) -> &str {
+    match level {
+        "off" => "Off",
+        "minimal" => "Minimal",
+        "low" => "Low",
+        "medium" => "Medium",
+        "high" => "High",
+        "xhigh" => "Extra high",
+        "max" => "Maximum",
+        other => other,
+    }
+}
+
+impl PrimeDesktopView {
+    /// Mount at the window root so the menu can flip above a bottom-docked composer
+    /// and float outside the welcome and transcript scroll viewports.
+    pub(in crate::ui) fn reasoning_picker(&self, p: Palette) -> Option<El> {
+        if !self.reasoning_picker_open {
+            return None;
+        }
+        let mut options = col()
+            .key("reasoning-options")
+            .role("listbox")
+            .label("Reasoning effort")
+            .focus_group()
+            .gap(1.)
+            .min_h(0.)
+            .max_h(248.)
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            });
+        if let Some(model) = self
+            .current_catalog_model()
+            .filter(|m| !m.supported_levels.is_empty())
+        {
+            for (index, level) in model.supported_levels.iter().enumerate() {
+                let selected = self.session.thinking_level == *level;
+                let (session, provider, model_id) = (
+                    self.session.active_session_id.clone(),
+                    model.provider.clone(),
+                    model.id.clone(),
+                );
+                let id = level.clone();
+                let mut option = row()
+                    .key(format!("reasoning-level-{level}"))
+                    .role("option")
+                    .label(effort_name(level))
+                    .focusable(true)
+                    .focus_selected(selected)
+                    .position_in_set(index + 1, model.supported_levels.len())
+                    .h(30.)
+                    .px(9.)
+                    .gap(12.)
+                    .radius(5.)
+                    .items_center()
+                    .cursor(Cursor::Pointer)
+                    .hover(p.bg_hover)
+                    .focus_highlight(p.bg_hover)
+                    .child(label(effort_name(level), 13., p.text_primary).grow(1.))
+                    .on_press(move |s: &mut Self| {
+                        s.select_reasoning_level(&session, &provider, &model_id, &id);
+                    });
+                if selected {
+                    option = option.child(Icon::Check.render(14., p.text_primary));
+                }
+                options = options.child(option);
+            }
+        } else {
+            let message = if self.daemon_connected
+                && (!self.model_catalog_loaded() || self.session.active_session_id.is_empty())
+            {
+                "Loading session settings…"
+            } else {
+                "No reasoning levels available for this model."
+            };
+            options = options.child(label(message, 12., p.text_secondary).wrap().padding(8.));
+        }
+        let surface = col()
+            .key("reasoning-picker")
+            .label("Reasoning effort")
+            .hit()
+            .w(178.)
+            .padding(5.)
+            .radius(9.)
+            .fill(p.bg_elevated)
+            .border(1., p.border_strong)
+            .shadow(3., 12., rune::Color::BLACK.alpha(0.16))
+            .focus_return("composer-effort-pill")
+            .modal(true, Self::close_reasoning_picker)
+            .anchored_fit("composer-effort-pill", Side::Top, Align::Start, 5.)
+            .child(options);
+        Some(
+            el().key("reasoning-layer")
+                .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+                .child(
+                    el().key("reasoning-outside")
+                        .role("none")
+                        .w_full()
+                        .h_full()
+                        .on_press(Self::close_reasoning_picker),
+                )
+                .child(surface),
+        )
+    }
 }
 
 fn submit(s: &mut PrimeDesktopView) {
@@ -366,4 +488,110 @@ fn queued(s: &PrimeDesktopView, p: Palette) -> El {
                     });
                 }),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use rune::{Env, Key, KeyEvent, Mods, Runtime};
+    use tempfile::TempDir;
+
+    use crate::state::models::parse_model_catalog;
+    use crate::ui::workspace::{LaunchOptions, PrimeDesktopView};
+
+    fn click(app: &mut Runtime<PrimeDesktopView>, key: &str) {
+        let (x, y) = app.find(key).unwrap();
+        app.pointer_down(x, y);
+        app.pointer_up(x, y);
+        app.frame(0.);
+    }
+
+    fn press(app: &mut Runtime<PrimeDesktopView>, key: Key) {
+        let event = KeyEvent {
+            key,
+            mods: Mods::default(),
+        };
+        app.key(event.clone());
+        app.key_up(event);
+        app.frame(0.);
+    }
+
+    #[test]
+    fn reasoning_menu_uses_model_levels_and_supports_direct_keyboard_selection() {
+        let tmp = TempDir::new().unwrap();
+        let mut view = PrimeDesktopView::new(
+            LaunchOptions {
+                initial_cwd: Some(tmp.path().into()),
+                daemon_socket: Some(tmp.path().join("test.sock")),
+                ..LaunchOptions::default()
+            },
+            tmp.path().into(),
+        );
+        view.daemon_connected = true;
+        view.session.active_session_id = "agent".into();
+        view.session.model_provider = Some("example".into());
+        view.session.model_id = Some("sparse".into());
+        view.session.thinking_level = "low".into();
+        view.catalog_models = parse_model_catalog(&serde_json::json!({"models":[{
+            "provider":"example", "id":"sparse", "reasoning":true,
+            "thinkingLevelMap":{"off":null,"minimal":null,"medium":null,"high":null,"max":"maximum"}
+        }]}))
+        .0;
+        let mut app = Runtime::new(
+            view,
+            PrimeDesktopView::view,
+            (950., 720.),
+            Env::new(false, 1.),
+        );
+        // A model that only supports Off has no setting to choose.
+        app.state.catalog_models.push(
+            parse_model_catalog(&serde_json::json!({"models":[
+                {"provider":"example","id":"fixed","reasoning":false}
+            ]}))
+            .0
+            .pop()
+            .unwrap(),
+        );
+        app.state.session.model_id = Some("fixed".into());
+        app.invalidate();
+        app.frame(0.);
+        assert!(app.find("composer-effort-pill").is_none());
+        app.state.session.model_id = Some("sparse".into());
+        app.invalidate();
+        app.frame(0.);
+        click(&mut app, "composer-effort-pill");
+        let levels = app
+            .elements()
+            .into_iter()
+            .filter(|e| {
+                e.key
+                    .as_deref()
+                    .is_some_and(|k| k.starts_with("reasoning-level-"))
+            })
+            .map(|e| (e.key.unwrap(), e.item_selected))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            levels,
+            [
+                ("reasoning-level-low".into(), true),
+                ("reasoning-level-max".into(), false)
+            ]
+        );
+        press(&mut app, Key::Escape);
+        assert!(!app.state.reasoning_picker_open);
+        click(&mut app, "composer-effort-pill");
+        // A click outside dismisses without sending a setting change.
+        app.pointer_down(5., 5.);
+        app.pointer_up(5., 5.);
+        app.frame(0.);
+        assert!(!app.state.reasoning_picker_open);
+        click(&mut app, "composer-effort-pill");
+        press(&mut app, Key::Down);
+        assert!(
+            app.elements()
+                .iter()
+                .any(|e| e.key.as_deref() == Some("reasoning-level-max") && e.focused)
+        );
+        press(&mut app, Key::Enter);
+        assert!(!app.state.reasoning_picker_open);
+    }
 }

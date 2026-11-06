@@ -144,3 +144,35 @@ fn narrow_drawers_are_exclusive_and_opening_a_chat_returns_focus_to_the_composer
     assert!(!app.state.prefs.inspector_open);
     assert!(app.state.composer_input.focused);
 }
+
+#[test]
+fn tab_reveals_the_focused_row_action_for_a_nested_project_path() {
+    let profile = tempfile::tempdir().unwrap();
+    let mut app = open_sidebar(profile.path(), vec![saved(ALPHA, "original")]);
+    app.set_full_keyboard_access(true);
+    let key = "project-pin-/work/alpha";
+    assert!(app.state.sidebar_focused_action.is_none());
+    assert!(visible(&app, "sidebar-draft-/work/alpha").is_none());
+
+    // Begin on a neighboring button and Tab through the normal Rune focus order.
+    click(&mut app, "project-toggle-/work/alpha");
+    for _ in 0..5 {
+        app.key(rune::Key::Tab.into());
+        draw(&mut app);
+        app.key_up(rune::Key::Tab.into());
+        draw(&mut app);
+        if app.state.sidebar_focused_action.as_deref() == Some(key) {
+            let pin = app
+                .elements()
+                .into_iter()
+                .find(|e| e.key.as_deref() == Some(key))
+                .unwrap();
+            assert!(pin.focus_visible);
+            app.key(rune::Key::Text(" ".into()).into());
+            draw(&mut app);
+            assert!(visible(&app, "confirm-card").is_some());
+            return;
+        }
+    }
+    panic!("Tab never reached the project action");
+}

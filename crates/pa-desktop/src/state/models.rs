@@ -29,18 +29,6 @@ impl CatalogModel {
         provider_display_name(&self.provider)
     }
 
-    /// Wrap within this model's advertised effort levels, including the first selection.
-    pub(crate) fn next_thinking_level(&self, current: &str) -> Option<&str> {
-        let mut levels = self.supported_levels.iter().map(String::as_str);
-        let first = levels.clone().next()?;
-        let next = if levels.any(|level| level == current) {
-            levels.next().unwrap_or(first)
-        } else {
-            first
-        };
-        (next != current).then_some(next)
-    }
-
     #[must_use]
     pub fn matches_query(&self, query: &str) -> bool {
         let q = query.trim().to_ascii_lowercase();
@@ -197,14 +185,12 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn cycle_skips_disabled_efforts_and_includes_mapped_max() {
+    fn supported_levels_skip_disabled_efforts_and_include_mapped_max() {
         let (models, _) = parse_model_catalog(&json!({"models":[{
             "provider":"example", "id":"sparse", "reasoning":true,
             "thinkingLevelMap":{"off":null,"minimal":null,"high":null,"medium":null,"max":"maximum"}
         }]}));
         let model = &models[0];
         assert_eq!(model.supported_levels, ["low", "max"]);
-        assert_eq!(model.next_thinking_level("low"), Some("max"));
-        assert_eq!(model.next_thinking_level("max"), Some("low"));
     }
 }

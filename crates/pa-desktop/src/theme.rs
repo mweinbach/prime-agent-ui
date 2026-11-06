@@ -282,7 +282,7 @@ impl Palette {
                 bg_code: rgb(0x0013_1210),
                 bg_user_bubble: rgb(0x002B_2924),
                 bg_hover: rgba(0xFFF7_E810),
-                bg_selected: rgba(0xD977_5722),
+                bg_selected: rgb(0x0030_2F2B),
                 bg_scrim: rgba(0x0B0A_09AD),
 
                 border_subtle: rgba(0xFFF6_E514),
@@ -290,7 +290,7 @@ impl Palette {
 
                 text_primary: rgb(0x00F2_EFE9),
                 text_secondary: rgb(0x00AD_A79C),
-                text_muted: rgb(0x009A_958A),
+                text_muted: rgb(0x00A4_9E93),
                 text_on_accent: rgb(0x0029_1F18),
 
                 accent: rgb(0x00E0_A289),
@@ -317,7 +317,7 @@ impl Palette {
                 bg_code: rgb(0x00F2_F1EE),
                 bg_user_bubble: rgb(0x00EF_ECE5),
                 bg_hover: rgba(0x1F1D_190D),
-                bg_selected: rgba(0xC964_421C),
+                bg_selected: rgb(0x00E9_E8E3),
                 bg_scrim: rgba(0x1C1A_1666),
 
                 border_subtle: rgba(0x1F1D_1916),
@@ -325,7 +325,7 @@ impl Palette {
 
                 text_primary: rgb(0x002B_2925),
                 text_secondary: rgb(0x005E_5A52),
-                text_muted: rgb(0x006D_685E),
+                text_muted: rgb(0x0068_645B),
                 text_on_accent: rgb(0x00FF_FDF9),
 
                 accent: rgb(0x009F_5037),

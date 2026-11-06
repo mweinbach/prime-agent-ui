@@ -30,17 +30,11 @@ fn heading(value: impl Into<String>, p: Palette) -> El {
 }
 
 fn stack() -> El {
-    col().w_full().gap(14.0)
+    col().w_full().gap(19.0)
 }
 
-fn card(p: Palette) -> El {
-    col()
-        .w_full()
-        .padding(13.0)
-        .gap(10.0)
-        .radius(10.0)
-        .border(1.0, p.border_subtle)
-        .fill(p.bg_elevated)
+fn section() -> El {
+    col().w_full().gap(9.0)
 }
 
 fn actions() -> El {
@@ -63,30 +57,14 @@ fn field(
         .border(1.0, p.border_strong)
 }
 
-fn empty_state(title: &str, detail: &str, p: Palette) -> El {
-    col()
-        .w_full()
-        .gap(5.0)
-        .padding(14.0)
-        .radius(9.0)
-        .border(1.0, p.border_subtle)
-        .child(label(title, 13.5, 550.0, p.text_primary))
-        .child(caption(detail, p.text_secondary))
-}
-
-fn primary_action(key: &str, title: &str, p: Palette, press: fn(&mut PrimeDesktopView)) -> El {
-    control(key, title, p)
-        .h(30.0)
-        .px(10.0)
-        .center()
-        .fill(p.accent)
-        .hover(p.accent_hover)
-        .child(label(title, 12.0, 600.0, p.text_on_accent))
+fn form_action(key: &str, title: &str, p: Palette, press: fn(&mut PrimeDesktopView)) -> El {
+    button(key, title, p)
+        .border(1.0, p.border_strong)
         .on_press(press)
 }
 
 fn action_base(key: impl Into<String>, label: &str, p: Palette) -> El {
-    button(key, label, p).fill(p.bg_hover).hover(p.bg_selected)
+    button(key, label, p).self_start()
 }
 
 fn action(
@@ -105,20 +83,29 @@ fn option(
     p: Palette,
     press: impl Fn(&mut PrimeDesktopView) + 'static,
 ) -> El {
-    let ink = if selected { p.accent } else { p.text_secondary };
+    let ink = if selected {
+        p.text_primary
+    } else {
+        p.text_secondary
+    };
     control(key, title, p)
         .role("radio")
         .focus_selected(selected)
         .checked(selected)
         .fill(if selected {
-            p.bg_selected
+            p.bg_hover
         } else {
             Color::TRANSPARENT
         })
         .center()
         .h(27.0)
         .px(6.5)
-        .child(label(title, 12.0, if selected { 600. } else { 450. }, ink))
+        .child(label(
+            title,
+            12.0,
+            if selected { 600.0 } else { 450.0 },
+            ink,
+        ))
         .on_press(press)
 }
 
@@ -162,7 +149,7 @@ impl PrimeDesktopView {
                     p.text_secondary
                 };
                 let marker = if selected {
-                    p.accent
+                    p.text_secondary
                 } else {
                     Color::TRANSPARENT
                 };
@@ -199,11 +186,7 @@ impl PrimeDesktopView {
                 }
             });
         let body = if self.session.active_session_id.is_empty() && active != InspectorTab::Harness {
-            empty_state(
-                "No active chat",
-                "Start a chat or open one from history to inspect its session.",
-                p,
-            )
+            caption("Open a chat to inspect its session.", p.text_secondary)
         } else {
             match active {
                 InspectorTab::Agents => self.inspector_agents(p),
@@ -212,6 +195,12 @@ impl PrimeDesktopView {
                 InspectorTab::System => self.inspector_system(p),
             }
         };
+        let mut tools = row().center_y().gap(3.0);
+        if !self.session.active_session_id.is_empty()
+            || (active == InspectorTab::Harness && !self.harness.global_entries.is_empty())
+        {
+            tools = tools.child(refresh);
+        }
         col()
             .key("inspector")
             .role("group")
@@ -228,7 +217,7 @@ impl PrimeDesktopView {
                     .justify_between()
                     .child(label("Inspector", 18.0, 600.0, p.text_primary))
                     .child(
-                        row().center_y().gap(3.0).child(refresh).child(
+                        tools.child(
                             icon_button("inspector-close", "Close inspector", Icon::Close, p)
                                 .on_press(Self::toggle_inspector),
                         ),
@@ -266,9 +255,11 @@ impl PrimeDesktopView {
                 })
             };
             body = body.child(
-                card(p)
-                    .child(heading("Maximum agent depth", p))
-                    .child(caption("Allowed levels of nested agents", p.text_secondary))
+                row()
+                    .w_full()
+                    .center_y()
+                    .justify_between()
+                    .child(caption("Maximum agent depth", p.text_primary))
                     .child(
                         actions()
                             .child(step("−", depth.saturating_sub(1)))
@@ -277,10 +268,9 @@ impl PrimeDesktopView {
                     ),
             );
         }
-        body = body.child(heading(
-            format!("Direct subagents ({})", children.rows.len()),
-            p,
-        ));
+        if !children.rows.is_empty() {
+            body = body.child(heading("Direct subagents", p));
+        }
         if let Some(error) = &children.load_error {
             body = body.child(caption(
                 format!("Couldn’t load subagents: {error}"),
@@ -333,7 +323,7 @@ impl PrimeDesktopView {
             other => (other, p.text_secondary),
         };
         let id = &child.rlm_child_id;
-        let mut content = card(p).key(format!("child-{id}")).child(
+        let mut content = section().key(format!("child-{id}")).child(
             row()
                 .center_y()
                 .gap(6.0)
@@ -446,57 +436,18 @@ impl PrimeDesktopView {
 
     fn inspector_harness(&self, p: Palette) -> El {
         let scope = self.harness_scope;
-        let mut body = stack()
-            .child(
-                row()
-                    .w_full()
-                    .center_y()
-                    .justify_between()
-                    .child(label("Scope", 13.0, 500.0, p.text_secondary))
-                    .child(
-                        row()
-                            .role("radiogroup")
-                            .focus_group()
-                            .label("Harness scope")
-                            .gap(2.0)
-                            .padding(3.0)
-                            .radius(8.0)
-                            .fill(p.bg_code)
-                            .border(1.0, p.border_subtle)
-                            .children(
-                                [
-                                    (HarnessScope::Global, "Global", "Global"),
-                                    (HarnessScope::Local, "Session Local", "This chat"),
-                                ]
-                                .map(|(value, key, name)| {
-                                    option(
-                                        format!("scope-{key}"),
-                                        name,
-                                        value == scope,
-                                        p,
-                                        move |s| s.harness_scope = value,
-                                    )
-                                }),
-                            ),
-                    ),
-            )
-            .child(el().w_full().h(1.0).fill(p.border_subtle))
-            .child(
-                row()
-                    .w_full()
-                    .center_y()
-                    .justify_between()
-                    .child(heading("Entries", p))
-                    .child(primary_action(
-                        "harness-new",
-                        "New entry",
-                        p,
-                        Self::open_new_harness_editor,
-                    )),
-            );
+        let scope_entries = self.harness.entries_for(scope);
+        let has_chat = !self.session.active_session_id.is_empty();
+        let mut body = stack();
         if self.harness_editor_open {
-            body = body.child(
-                card(p)
+            let title = match (self.harness_editing_id.is_some(), scope) {
+                (true, _) => "Edit entry",
+                (false, HarnessScope::Global) => "New global entry",
+                (false, HarnessScope::Local) => "New chat entry",
+            };
+            return body.child(
+                section()
+                    .child(heading(title, p))
                     .child(actions().children(KINDS.map(|(kind, label)| {
                         option(
                             format!("editor-kind-{label}"),
@@ -545,7 +496,7 @@ impl PrimeDesktopView {
                                 p,
                                 Self::close_harness_editor,
                             ))
-                            .child(primary_action(
+                            .child(form_action(
                                 "editor-save",
                                 "Save entry",
                                 p,
@@ -554,28 +505,74 @@ impl PrimeDesktopView {
                     ),
             );
         }
+        let scope_control = if has_chat {
+            row()
+                .role("radiogroup")
+                .focus_group()
+                .label("Entry scope")
+                .gap(2.0)
+                .children(
+                    [
+                        (HarnessScope::Global, "Global", "Global"),
+                        (HarnessScope::Local, "Session Local", "This chat"),
+                    ]
+                    .map(|(value, key, name)| {
+                        option(format!("scope-{key}"), name, value == scope, p, move |s| {
+                            s.harness_scope = value;
+                            s.harness_kind_filter = None;
+                        })
+                    }),
+                )
+        } else if scope_entries.is_empty() {
+            caption("No global entries yet", p.text_secondary)
+        } else {
+            heading("Global entries", p)
+        };
         body = body.child(
-            actions()
-                .child(option(
-                    "filter-all",
-                    "All",
-                    self.harness_kind_filter.is_none(),
+            row()
+                .w_full()
+                .center_y()
+                .justify_between()
+                .child(scope_control)
+                .child(form_action(
+                    "harness-new",
+                    "New entry",
                     p,
-                    |s| s.harness_kind_filter = None,
-                ))
-                .children(KINDS.map(|(kind, label)| {
-                    option(
-                        format!("filter-{label}"),
-                        label,
-                        self.harness_kind_filter == Some(kind),
-                        p,
-                        move |s| s.harness_kind_filter = Some(kind),
-                    )
-                })),
+                    Self::open_new_harness_editor,
+                )),
         );
-        let mut entries = self
-            .harness
-            .entries_for(scope)
+
+        let diverse = scope_entries
+            .first()
+            .is_some_and(|first| scope_entries.iter().any(|entry| entry.kind != first.kind));
+        if !scope_entries.is_empty() && (diverse || self.harness_kind_filter.is_some()) {
+            let kinds_in_scope = KINDS
+                .into_iter()
+                .filter(|(kind, _)| scope_entries.iter().any(|entry| entry.kind == *kind));
+            body = body.child(
+                actions()
+                    .role("radiogroup")
+                    .focus_group()
+                    .label("Filter entry type")
+                    .child(option(
+                        "filter-all",
+                        "All",
+                        self.harness_kind_filter.is_none(),
+                        p,
+                        |s| s.harness_kind_filter = None,
+                    ))
+                    .children(kinds_in_scope.map(|(kind, label)| {
+                        option(
+                            format!("filter-{label}"),
+                            label,
+                            self.harness_kind_filter == Some(kind),
+                            p,
+                            move |s| s.harness_kind_filter = Some(kind),
+                        )
+                    })),
+            );
+        }
+        let mut entries = scope_entries
             .iter()
             .filter(|entry| {
                 self.harness_kind_filter
@@ -583,25 +580,11 @@ impl PrimeDesktopView {
             })
             .peekable();
         if entries.peek().is_none() {
-            body = body.child(if self.harness_kind_filter.is_some() {
-                empty_state(
-                    "No matching entries",
-                    "Choose All to see the other entry types.",
-                    p,
-                )
-            } else if scope == HarnessScope::Global {
-                empty_state(
-                    "No global entries yet",
-                    "Add a memory, prompt, skill or subagent to use across chats.",
-                    p,
-                )
-            } else {
-                empty_state(
-                    "No entries for this chat",
-                    "Entries saved here apply only to this session.",
-                    p,
-                )
-            });
+            if !scope_entries.is_empty() {
+                body = body.child(caption("No matching entries.", p.text_secondary));
+            } else if has_chat {
+                body = body.child(caption("No entries yet.", p.text_secondary));
+            }
         }
         for entry in entries {
             let kind = entry.kind;
@@ -612,7 +595,7 @@ impl PrimeDesktopView {
             let msg = format!("Delete the harness entry “{}”?", entry.title);
             let sid = self.session.active_session_id.clone();
             body = body.child(
-                card(p)
+                section()
                     .child(stat(
                         &entry.title,
                         format!("{} v{}", format!("{kind:?}").to_lowercase(), entry.version),
@@ -641,42 +624,35 @@ impl PrimeDesktopView {
                     ),
             );
         }
-        let can_refine = !self.session.active_session_id.is_empty();
-        let run = action_base("harness-refine", "Run refinement", p);
-        let mut refinement = col()
-            .w_full()
-            .gap(9.0)
-            .child(el().w_full().h(1.0).fill(p.border_subtle))
-            .child(heading("Refinement", p))
-            .child(
-                field(
-                    "refine-input",
-                    &self.refine_input,
-                    "Optional refinement focus…",
-                    p,
-                    |s| &mut s.refine_input,
-                )
-                .single_line()
-                .on_submit(|s: &mut Self, _| s.submit_refinement()),
+        if has_chat {
+            body = body.child(
+                section()
+                    .child(heading("Refinement", p))
+                    .child(
+                        field(
+                            "refine-input",
+                            &self.refine_input,
+                            "Optional instructions…",
+                            p,
+                            |s| &mut s.refine_input,
+                        )
+                        .single_line()
+                        .on_submit(|s: &mut Self, _| s.submit_refinement()),
+                    )
+                    .child(action(
+                        "harness-refine",
+                        "Run refinement",
+                        p,
+                        Self::submit_refinement,
+                    )),
             );
-        if !can_refine {
-            refinement = refinement.child(caption(
-                "Open a chat to run a refinement on its history.",
-                p.text_secondary,
-            ));
         }
-        let run = if can_refine {
-            run.on_press(Self::submit_refinement)
-        } else {
-            run.disabled(true).cursor(Cursor::Default).opacity(0.55)
-        };
-        body = body.child(refinement.child(actions().justify_end().child(run)));
         if !self.harness.history.is_empty() {
             body = body.child(heading("Recent refinements", p));
         }
         for revision in self.harness.history.iter().take(6) {
-            let mut revision_card = card(p)
-                .child(caption(truncate_chars(&revision.id, 24), p.accent))
+            let mut revision_card = section()
+                .child(caption(truncate_chars(&revision.id, 24), p.text_secondary))
                 .child(caption(
                     truncate_chars(&revision.summary, 110),
                     p.text_secondary,
@@ -708,32 +684,30 @@ impl PrimeDesktopView {
     }
 
     fn inspector_runtime(&self, p: Palette) -> El {
-        let mut body = stack()
-            .child(
-                card(p)
-                    .child(heading("Run in session directory", p))
-                    .child(
-                        field(
-                            "quick-bash",
-                            &self.quick_bash_input,
-                            "cargo test --workspace",
-                            p,
-                            |s| &mut s.quick_bash_input,
-                        )
-                        .font(TextStyle::new(13.0, 400.0).mono().lh(20.0))
-                        .single_line()
-                        .on_submit(|s: &mut Self, _| s.submit_quick_bash()),
-                    )
-                    .child(action(
-                        "run-shell-command",
-                        "Run",
+        let mut body = stack().child(
+            section()
+                .child(heading("Run in session directory", p))
+                .child(
+                    field(
+                        "quick-bash",
+                        &self.quick_bash_input,
+                        "cargo test --workspace",
                         p,
-                        Self::submit_quick_bash,
-                    )),
-            )
-            .child(heading(format!("Shells ({})", self.shells.len()), p));
-        if self.shells.is_empty() {
-            body = body.child(caption("No shells in this session.", p.text_muted));
+                        |s| &mut s.quick_bash_input,
+                    )
+                    .font(TextStyle::new(13.0, 400.0).mono().lh(20.0))
+                    .single_line()
+                    .on_submit(|s: &mut Self, _| s.submit_quick_bash()),
+                )
+                .child(action(
+                    "run-shell-command",
+                    "Run",
+                    p,
+                    Self::submit_quick_bash,
+                )),
+        );
+        if !self.shells.is_empty() {
+            body = body.child(heading("Shells", p));
         }
         for shell in &self.shells {
             let status = if shell.persistent {
@@ -743,7 +717,7 @@ impl PrimeDesktopView {
             } else {
                 "exited"
             };
-            let mut shell_card = card(p).child(stat(&shell.command, status, p));
+            let mut shell_card = section().child(stat(&shell.command, status, p));
             if let Some(output) = self
                 .shell_tails
                 .get(&shell.id)
@@ -784,11 +758,8 @@ impl PrimeDesktopView {
             }
             body = body.child(shell_card.child(controls));
         }
-        let mut schedules = card(p)
-            .child(heading(
-                format!("Heartbeats and schedules ({})", self.schedules.len()),
-                p,
-            ))
+        let mut schedules = section()
+            .child(heading("Heartbeats and schedules", p))
             .child(
                 field(
                     "schedule-interval",
@@ -858,62 +829,49 @@ impl PrimeDesktopView {
 
     fn inspector_system(&self, p: Palette) -> El {
         let telemetry = &self.telemetry;
-        let missing = "Not reported";
+        let mut usage = section().child(heading("Session usage", p));
         let context = match (telemetry.context_tokens, telemetry.context_window) {
-            (Some(tokens), Some(window)) => format!(
+            (Some(tokens), Some(window)) => Some(format!(
                 "{} / {}",
                 format_tokens_compact(tokens),
                 format_tokens_compact(window)
-            ),
-            (Some(tokens), None) => format!("{} used", format_tokens_compact(tokens)),
-            (None, Some(window)) => format!("{} capacity", format_tokens_compact(window)),
-            (None, None) => missing.to_owned(),
+            )),
+            (Some(tokens), None) => Some(format!("{} used", format_tokens_compact(tokens))),
+            (None, Some(window)) => Some(format!("{} capacity", format_tokens_compact(window))),
+            (None, None) => None,
         };
-        let input = telemetry
-            .total_input_tokens
-            .map_or_else(|| "—".to_owned(), format_tokens_compact);
-        let output = telemetry
-            .total_output_tokens
-            .map_or_else(|| "—".to_owned(), format_tokens_compact);
+        if let Some(context) = context {
+            usage = usage.child(stat("Context window", context, p));
+        }
+        if let Some(input) = telemetry.total_input_tokens {
+            usage = usage.child(stat("Input tokens", format_tokens_compact(input), p));
+        }
+        if let Some(output) = telemetry.total_output_tokens {
+            usage = usage.child(stat("Output tokens", format_tokens_compact(output), p));
+        }
+        if let Some(cached) = telemetry.cache_read_tokens {
+            usage = usage.child(stat("Cache read", format_tokens_compact(cached), p));
+        }
+        if let Some(cost) = telemetry.total_cost_usd {
+            usage = usage.child(stat("Cost", format!("${cost:.4}"), p));
+        }
         let mut body = stack().child(
-            card(p)
-                .child(heading("Session usage", p))
-                .child(stat("Context window", context, p))
-                .child(stat(
-                    "Input / Output",
-                    format!("{input} in · {output} out"),
-                    p,
-                ))
-                .child(stat(
-                    "Cache read",
-                    telemetry
-                        .cache_read_tokens
-                        .map_or_else(|| missing.to_owned(), format_tokens_compact),
-                    p,
-                ))
-                .child(stat(
-                    "Session cost",
-                    telemetry
-                        .total_cost_usd
-                        .map_or_else(|| missing.to_owned(), |cost| format!("${cost:.4}")),
-                    p,
-                ))
-                .child(
-                    actions()
-                        .child(action(
-                            "system-compact",
-                            "Compact",
-                            p,
-                            Self::trigger_compact,
-                        ))
-                        .child(action("system-reload", "Reload session", p, |s| {
-                            s.bridge.send(BridgeRequest::ReloadSession {
-                                active_session_id: s.session.active_session_id.clone(),
-                            });
-                        })),
-                ),
+            usage.child(
+                actions()
+                    .child(action(
+                        "system-compact",
+                        "Compact",
+                        p,
+                        Self::trigger_compact,
+                    ))
+                    .child(action("system-reload", "Reload session", p, |s| {
+                        s.bridge.send(BridgeRequest::ReloadSession {
+                            active_session_id: s.session.active_session_id.clone(),
+                        });
+                    })),
+            ),
         );
-        let mut policies = card(p).child(heading("Policies", p));
+        let mut policies = section().child(heading("Policies", p));
         for (is_retry, label, value) in [
             (false, "Auto-compaction", telemetry.auto_compaction),
             (true, "Auto-retry on transient errors", telemetry.auto_retry),
@@ -951,10 +909,10 @@ impl PrimeDesktopView {
                 );
             }
         }
-        if telemetry.auto_compaction.is_none() && telemetry.auto_retry.is_none() {
-            policies = policies.child(caption(missing, p.text_muted));
+        if telemetry.auto_compaction.is_some() || telemetry.auto_retry.is_some() {
+            body = body.child(policies);
         }
-        let mut providers = card(p).child(
+        let mut providers = section().child(
             row()
                 .w_full()
                 .center_y()
@@ -981,7 +939,7 @@ impl PrimeDesktopView {
                     )),
             );
         }
-        let mut mcp = card(p).child(heading(format!("MCP servers ({})", self.mcp_rows.len()), p));
+        let mut mcp = section().child(heading("MCP servers", p));
         for item in &self.mcp_rows {
             let request = BridgeRequest::RemoveMcp {
                 active_session_id: self.session.active_session_id.clone(),
@@ -1036,11 +994,11 @@ impl PrimeDesktopView {
                 p,
                 Self::submit_mcp_token,
             ));
-        body = body.child(policies).child(providers).child(mcp);
+        body = body.child(providers).child(mcp);
         if let Some(prompt) = &self.system_prompt {
             let copy = prompt.clone();
             body = body.child(
-                card(p)
+                section()
                     .child(
                         row()
                             .w_full()
