@@ -986,6 +986,7 @@ impl PrimeDesktopView {
                 })
                 .font(TextStyle::new(13.0, 400.0).mono().lh(20.0))
                 .single_line()
+                .secure()
                 .on_submit(|s: &mut Self, _| s.submit_mcp_token()),
             )
             .child(action(

@@ -163,7 +163,7 @@ impl PrimeDesktopView {
             .entry(self.draft_key())
             .or_default()
             .push_front(draft);
-        self.composer_input.replace_text("");
+        self.replace_composer_draft("");
     }
 
     pub(super) fn restore_draft(&mut self) {
@@ -176,7 +176,7 @@ impl PrimeDesktopView {
             if drafts.is_empty() {
                 self.drafts.remove(&key);
             }
-            self.composer_input.replace_text(text);
+            self.replace_composer_draft(text);
             self.staged_attachments = images;
         }
     }

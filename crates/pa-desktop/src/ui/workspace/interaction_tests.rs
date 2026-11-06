@@ -83,6 +83,48 @@ fn reduce_motion_toggles_from_settings_and_survives_relaunch() {
 }
 
 #[test]
+fn switching_chats_resets_prompt_history_to_the_restored_draft() {
+    use crate::bridge::{BridgeEvent, BridgeRequest};
+
+    let profile = TempDir::new().unwrap();
+    let mut app = workspace(&profile);
+    // Deliver the two attach replies explicitly on the headless runtime.
+    app.poll = None;
+    app.state.daemon_connected = true;
+    app.state.record_history("previously sent prompt");
+    app.state.session.active_session_id = "saved".into();
+    app.state.populate_draft("saved conversation draft");
+    let attach = |app: &mut Runtime<PrimeDesktopView>, session: &str| {
+        app.state.open_session(BridgeRequest::AttachSession {
+            active_session_id: session.into(),
+        });
+        app.state.apply_bridge_event(BridgeEvent::SessionAttached {
+            active_session_id: session.into(),
+            snapshot: serde_json::json!({}),
+        });
+        app.invalidate();
+        app.frame(0.);
+    };
+    attach(&mut app, "other");
+    key(
+        &mut app,
+        Key::Text("other conversation draft".into()),
+        false,
+    );
+    key(&mut app, Key::Up, false);
+    assert_eq!(app.state.composer_input.text, "previously sent prompt");
+
+    attach(&mut app, "saved");
+    assert_eq!(app.state.composer_input.text, "saved conversation draft");
+    key(&mut app, Key::Down, false);
+    assert_eq!(app.state.composer_input.text, "saved conversation draft");
+    key(&mut app, Key::Up, false);
+    assert_eq!(app.state.composer_input.text, "previously sent prompt");
+    key(&mut app, Key::Down, false);
+    assert_eq!(app.state.composer_input.text, "saved conversation draft");
+}
+
+#[test]
 fn search_and_completion_keys_act_on_the_highlighted_row() {
     let profile = TempDir::new().unwrap();
     let mut app = workspace(&profile);
@@ -321,4 +363,83 @@ fn long_error_paths_wrap_inside_a_dismissible_modal_notification() {
     app.frame(1. / 60.);
     assert!(app.state.toast.is_none());
     assert_eq!(app.state.active_modal, Some(ActiveModal::SettingsAuth));
+}
+
+#[test]
+fn provider_keys_and_mcp_tokens_mask_input_and_suppress_clipboard_writes() {
+    fn check_field(
+        app: &mut Runtime<PrimeDesktopView>,
+        field_key: &str,
+        value: &str,
+        edit: fn(&PrimeDesktopView) -> &rune::TextEdit,
+    ) {
+        // Paste is allowed so password managers can fill the field. The secret
+        // remains available to the controller, but the UI and clipboard hide it.
+        app.paste(value);
+        app.frame(1.0 / 60.0);
+        let model = edit(&app.state);
+        assert_eq!(model.text, value);
+        let displayed = model.display().0;
+        assert!(!displayed.is_empty() && displayed.chars().all(|ch| ch == '•'));
+
+        let nodes = app.elements();
+        let field = nodes
+            .iter()
+            .find(|node| node.key.as_deref() == Some(field_key))
+            .unwrap();
+        assert!(field.focused && app.element_is_secure(&field.path));
+        assert!(nodes.iter().all(|node| {
+            !node.text.as_deref().unwrap_or_default().contains(value)
+                && !node.label.as_deref().unwrap_or_default().contains(value)
+        }));
+
+        key(app, Key::Command('a'), true);
+        assert_eq!(edit(&app.state).selected(), value);
+        for chord in ['c', 'x'] {
+            key(app, Key::Command(chord), true);
+            assert!(
+                app.copy_request.take().is_none(),
+                "{field_key} produced a clipboard write"
+            );
+            assert_eq!(
+                edit(&app.state).text,
+                value,
+                "cut must leave a secure field intact"
+            );
+        }
+    }
+
+    let profile = TempDir::new().unwrap();
+    let mut app = workspace(&profile);
+    wait_until(&mut app, |s| {
+        s.provider_auth
+            .iter()
+            .any(|item| item.provider_id == "openai" && item.can_edit_api_key)
+    });
+    app.update(|s, _| s.open_provider_connect("openai"));
+    wait_until(&mut app, |s| {
+        s.connection_input.focused
+            && s.provider_connection
+                .as_ref()
+                .is_some_and(|p| p.prompt.is_some())
+    });
+    check_field(
+        &mut app,
+        "provider-connect-input",
+        "fixture-provider-key",
+        |s| &s.connection_input,
+    );
+
+    app.update(|s, tx| {
+        s.cancel_provider_connection();
+        s.session.active_session_id = "fixture-session".into();
+        s.set_inspector_tab(crate::theme::InspectorTab::System);
+        s.focus_input(|s| &mut s.mcp_token_input);
+        tx.scroll_into_view("mcp-token");
+    });
+    app.settle_all();
+    app.frame(1.0 / 60.0);
+    check_field(&mut app, "mcp-token", "fixture-bearer-token", |s| {
+        &s.mcp_token_input
+    });
 }

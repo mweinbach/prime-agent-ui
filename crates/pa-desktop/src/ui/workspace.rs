@@ -815,9 +815,13 @@ impl PrimeDesktopView {
         false
     }
 
+    fn replace_composer_draft(&mut self, text: impl Into<String>) {
+        self.composer_input.replace_text(text);
+        self.composer_edited();
+    }
+
     pub fn populate_draft(&mut self, prompt: &str) {
-        self.composer_input.replace_text(prompt);
-        self.slash_selected_idx = 0;
+        self.replace_composer_draft(prompt);
         self.focus_input(|s| &mut s.composer_input);
     }
 
@@ -866,7 +870,7 @@ impl PrimeDesktopView {
 
         self.follow_transcript();
         self.record_history(&trimmed);
-        self.composer_input.replace_text("");
+        self.replace_composer_draft("");
         let attachments = std::mem::take(&mut self.staged_attachments);
 
         // Builtin client slash shortcuts
@@ -1001,7 +1005,7 @@ impl PrimeDesktopView {
         }
         self.follow_transcript();
         self.record_history(&msg);
-        self.composer_input.replace_text("");
+        self.replace_composer_draft("");
         self.bridge
             .send(request(self.session.active_session_id.clone(), msg));
         self.restore_draft();
@@ -1014,7 +1018,7 @@ impl PrimeDesktopView {
         } else {
             format!("! {cur}")
         };
-        self.composer_input.replace_text(next);
+        self.replace_composer_draft(next);
         self.focus_input(|s| &mut s.composer_input);
     }
 

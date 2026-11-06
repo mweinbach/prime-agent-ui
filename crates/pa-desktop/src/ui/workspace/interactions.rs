@@ -56,6 +56,7 @@ impl PrimeDesktopView {
     pub(in crate::ui) fn composer_edited(&mut self) {
         self.slash_selected_idx = 0;
         self.history_cursor = None;
+        self.history_draft.clear();
     }
 
     pub(super) fn record_history(&mut self, entry: &str) {
