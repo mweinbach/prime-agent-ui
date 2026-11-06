@@ -65,14 +65,13 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config libfontconfig-dev libwayland-dev libx11-xcb-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libvulkan1
-      - name: Select Xcode and check Metal tools
+      - name: Select Xcode for macOS packaging
         if: runner.os == 'macOS'
         env:
           DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
         run: |
           xcodebuild -version
-          xcrun --sdk macosx metal --version
-          xcrun --sdk macosx --find metallib
+          xcrun --sdk macosx --find clang
           echo "DEVELOPER_DIR=$DEVELOPER_DIR" >> "$GITHUB_ENV"
       - name: Prepare the pinned Sparkle SDK
         if: runner.os == 'macOS'
@@ -86,22 +85,6 @@ jobs:
       - name: Exercise signed Sparkle feeds with a disposable test identity
         if: runner.os == 'macOS'
         run: python3 -B -m unittest discover -s scripts/tests -p test_sparkle_appcast.py
-      - name: Locate the Windows SDK shader compiler
-        if: runner.os == 'Windows'
-        run: |
-          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
-          # Prefer native fxc. Windows on Arm can also run the x64 shader tool;
-          # its shader bytecode is independent of the executable's CPU architecture.
-          $arches = if ($env:RUNNER_ARCH -eq 'ARM64') { 'arm64', 'x64' } else { 'x64' }
-          foreach ($arch in $arches) {
-            $fxc = Get-ChildItem "$sdk\*\$arch\fxc.exe" -ErrorAction SilentlyContinue |
-              Sort-Object { [version] $_.Directory.Parent.Name } -Descending |
-              Select-Object -First 1
-            if ($fxc) { break }
-          }
-          if (!$fxc) { throw "Windows SDK fxc.exe not found in $sdk" }
-          Write-Host "Using $($fxc.FullName)"
-          "GPUI_FXC_PATH=$($fxc.FullName)" >> $env:GITHUB_ENV
       - name: Build, package, and smoke-test the archive
         run: ${{ runner.os == 'Windows' && 'python' || 'python3' }} scripts/build_desktop.py --arch ${{ matrix.arch }} --out-dir dist/ci
       - name: Upload tested archive

@@ -1,19 +1,16 @@
-use super::{EMBEDDED_FONTS, REGISTERED, register_embedded_fonts};
+use super::{EMBEDDED_FONTS, Icon};
 use crate::theme::{font_display, font_mono, font_sans, font_serif};
-use gpui::TestAppContext;
 use std::collections::BTreeSet;
 
 #[test]
-fn registers_once_per_app() {
-    let app = TestAppContext::single();
-    let second_app = TestAppContext::single();
-    app.read(register_embedded_fonts);
-    app.read(register_embedded_fonts);
-    second_app.read(register_embedded_fonts);
-    // GPUI's in-memory test backend accepts fonts but has no font database.
-    REGISTERED.with_borrow(|entries| assert_eq!(entries.len(), 2));
-    second_app.quit();
-    app.quit();
+fn every_icon_rasterizes_in_runes_atlas() {
+    for icon in Icon::ALL {
+        let coverage = rune::text::icon_coverage(icon.glyph(), 24);
+        assert!(
+            coverage.iter().any(|&alpha| alpha > 0),
+            "empty icon {icon:?}"
+        );
+    }
 }
 
 // Read the handful of big-endian sfnt fields used for platform font matching.
@@ -100,7 +97,7 @@ fn static_faces_match_the_themes_and_native_style_selectors() {
     assert_eq!(font_serif(), font_display());
     let mut expected = BTreeSet::new();
     for (family, theme, styles) in families {
-        assert_eq!(theme.as_ref(), family);
+        assert_eq!(theme, family);
         for style in styles {
             expected.insert((family.to_owned(), (*style).to_owned()));
         }

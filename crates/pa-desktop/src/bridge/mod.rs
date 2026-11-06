@@ -1,7 +1,7 @@
 //! Non-blocking async daemon bridge (`pa-desktop` <-> `pa-daemon`).
 //!
 //! Runs all socket and process work on a dedicated 2-thread Tokio runtime so
-//! the GPUI render thread never blocks on network, IPC, or process spawns.
+//! the render thread never blocks on network, IPC, or process spawns.
 
 mod catalog;
 mod data;
@@ -42,7 +42,7 @@ use crate::theme::DaemonTarget;
 #[cfg(unix)]
 pub const DESKTOP_DAEMON_SOCKET_NAME: &str = "desktop-daemon.sock";
 
-/// Commands dispatched from the GPUI foreground view to the background I/O worker.
+/// Commands dispatched from the desktop view to the background I/O worker.
 #[derive(Debug, Clone)]
 pub enum BridgeRequest {
     Connect {
@@ -213,7 +213,7 @@ pub enum BridgeRequest {
     },
 }
 
-/// Asynchronous events pushed from the background worker to the GPUI foreground task.
+/// Asynchronous events pushed from the background worker to the desktop view.
 #[derive(Debug, Clone)]
 pub enum BridgeEvent {
     ConnectionStatus {
@@ -315,7 +315,7 @@ pub enum BridgeEvent {
     },
 }
 
-/// Non-blocking handle held by the GPUI window entity.
+/// Non-blocking handle held by the desktop window.
 pub struct BridgeHandle {
     tx: mpsc::UnboundedSender<BridgeRequest>,
     runtime: Arc<tokio::runtime::Runtime>,
@@ -347,6 +347,10 @@ impl BridgeHandle {
             },
             evt_rx,
         ))
+    }
+
+    pub(crate) fn spawn_blocking(&self, work: impl FnOnce() + Send + 'static) {
+        self.runtime.spawn_blocking(work);
     }
 
     /// Enqueue a request without awaiting any network or socket operation.

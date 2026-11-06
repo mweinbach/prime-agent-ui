@@ -1,522 +1,415 @@
-//! Center conversation stage: frameless header, Goal banner, editorial empty state,
-//! scrollable rich transcript, and `/btw` side-question scratchpad.
+//! The conversation stage and its Rune timeline. Offscreen turns are built on demand.
 
-use gpui::{AnyElement, Context, FontWeight, SharedString, div, prelude::*, px};
+use std::borrow::Cow;
 
+use rune::{Cx, El, Family, GrowthSpec, Key, ScrollSpec, TextStyle, col, el, row, text};
+
+use super::composer::composer;
+use super::markdown::render_markdown;
+use super::selectable_text::{control, copy_button, icon_control, label};
+use super::text_input::field;
+use super::tool_cards::{console, disclosure, pill, render_tool_card};
+use super::workspace::PrimeDesktopView;
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
-use crate::state::projects::folder_label;
-use crate::state::transcript::{AssistantBlock, TranscriptEntry};
-use crate::state::{format_tokens_compact, truncate_chars};
-use crate::theme::{DetailLevel, InspectorTab, Palette, font_mono, font_sans, font_serif};
-use crate::ui::composer::render_composer;
-use crate::ui::markdown::{render_markdown, render_markdown_streaming};
-use crate::ui::selectable_text::{SelectableText, copy_button};
-use crate::ui::sidebar::project_tooltip;
-use crate::ui::syntax::strip_ansi;
-use crate::ui::tool_cards::{
-    pill, render_agent_mail_card, render_console_output, render_tool_card,
+use crate::state::{
+    format_tokens_compact,
+    projects::folder_label,
+    transcript::{AssistantBlock, MailKind, TranscriptEntry},
 };
-use crate::ui::workspace::PrimeDesktopView;
+use crate::theme::{DetailLevel, InspectorTab, Palette, font_display};
 
-#[must_use]
-#[allow(clippy::too_many_lines)]
-pub fn render_stage(
-    view: &PrimeDesktopView,
-    palette: Palette,
-    sidebar_docked: bool,
-    docked_sidebar_width: gpui::Pixels,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let attached = !view.session.active_session_id.is_empty();
-    let empty = view.session.entries.is_empty() && !view.session.is_streaming;
-    let titlebar_padding = if cfg!(target_os = "macos") {
-        (px(82.0) - docked_sidebar_width).max(px(20.0))
-    } else {
-        px(20.0)
-    };
-    let project_cwd = view.current_project();
-    let subagent_count = view.rlm_children.rows.len();
-
-    div()
-        .debug_selector(|| "workspace-stage".to_owned())
-        .flex_1()
-        .min_w_0()
-        .h_full()
-        .overflow_hidden()
-        .flex()
-        .flex_col()
-        .bg(palette.bg_canvas)
-        .child(
-            div()
-                .h(px(52.0))
-                .flex_none()
-                .pl(titlebar_padding)
-                .pr(px(16.0))
-                .flex()
-                .items_center()
-                .justify_between()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .overflow_hidden()
-                        .when(!sidebar_docked, |d| {
-                            d.child(
-                                div()
-                                    .id("stage-open-sidebar-btn")
-                                    .p(px(7.0))
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(palette.bg_hover))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_sidebar(window, cx);
-                                    }))
-                                    .child(Icon::Sidebar.render(16.0, palette.text_secondary)),
-                            )
-                            .child(
-                                div()
-                                    .id("stage-new-chat")
-                                    .p(px(7.0))
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(palette.bg_hover))
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.start_fresh_session(window, cx);
-                                    }))
-                                    .tooltip(project_tooltip("New chat".into(), palette))
-                                    .child(Icon::Compose.render(16.0, palette.text_secondary)),
-                            )
-                        })
-                        .child(if let Some(parent_id) = view.parent_session_target() {
-                            div()
-                                .id("subagent-parent")
-                                .debug_selector(|| "subagent-parent".to_owned())
-                                .flex_none()
-                                .flex()
-                                .items_center()
-                                .gap(px(5.0))
-                                .px(px(6.0))
-                                .py(px(4.0))
-                                .rounded_md()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(palette.bg_hover))
-                                .text_size(px(12.0))
-                                .text_color(palette.text_secondary)
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.open_session(
-                                        BridgeRequest::AttachSession {
-                                            active_session_id: parent_id.clone(),
-                                        },
-                                        cx,
-                                    );
-                                }))
-                                .child(Icon::GitBranch.render(13.0, palette.text_muted))
-                                .child("Parent chat")
-                                .into_any_element()
-                        } else {
-                            div()
-                                .id("stage-project-folder")
-                                .debug_selector(|| "stage-project-folder".to_owned())
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .when(!project_cwd.is_empty(), |d| {
-                                    d.rounded_md()
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(palette.bg_hover))
-                                        .tooltip(project_tooltip(
-                                            format!("Show project: {project_cwd}").into(),
-                                            palette,
-                                        ))
-                                        .on_click(cx.listener(|view, _, window, cx| {
-                                            view.reveal_current_project(window, cx);
-                                        }))
-                                })
-                                .child(Icon::Folder.render(13.0, palette.text_muted))
-                                .child(
-                                    div()
-                                        .min_w_0()
-                                        .max_w(px(140.0))
-                                        .truncate()
-                                        .text_size(px(12.0))
-                                        .text_color(palette.text_secondary)
-                                        .child(folder_label(project_cwd)),
-                                )
-                                .into_any_element()
-                        })
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(palette.text_muted)
-                                .child("/"),
+impl PrimeDesktopView {
+    pub(super) fn stage(&self, cx: &mut Cx<Self>) -> El {
+        let p = Palette::for_mode(self.prefs.theme);
+        let mut stage = col()
+            .key("workspace-stage")
+            .grow(1.)
+            .h_full()
+            .min_h(0.)
+            .min_w(0.)
+            .fill(p.bg_canvas)
+            .child(self.stage_header(cx, p));
+        if let Some(goal) = self
+            .session
+            .goal
+            .as_ref()
+            .filter(|g| g.active || g.objective.is_some())
+        {
+            let mut status = format!(
+                "{} · {}",
+                goal.status.slug(),
+                format_tokens_compact(goal.tokens_used)
+            );
+            if let Some(budget) = goal.token_budget.filter(|b| *b > 0) {
+                status.push_str(&format!(" / {}", format_tokens_compact(budget)));
+            }
+            stage = stage.child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .gap(8.)
+                    .px(18.)
+                    .py(7.)
+                    .fill(p.accent_soft)
+                    .child(Icon::Target.render(14., p.accent))
+                    .child(
+                        label(
+                            goal.objective.as_deref().unwrap_or("Active goal"),
+                            12.5,
+                            p.text_primary,
                         )
-                        .child(if attached && view.renaming_session {
-                            div()
-                                .w(px(220.0))
-                                .min_w_0()
-                                .px(px(8.0))
-                                .py(px(3.0))
-                                .rounded_md()
-                                .border_1()
-                                .border_color(palette.accent)
-                                .bg(palette.bg_elevated)
-                                .child(view.rename_input.clone())
-                                .into_any_element()
-                        } else if attached {
-                            div()
-                                .id("stage-session-title")
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .px(px(6.0))
-                                .py(px(4.0))
-                                .rounded_md()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(palette.bg_hover))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.begin_rename_session(window, cx);
-                                }))
-                                .child(
-                                    div()
-                                        .truncate()
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .child(view.session.display_title()),
-                                )
-                                .child(Icon::EditPen.render(11.0, palette.text_muted))
-                                .into_any_element()
-                        } else {
-                            div()
-                                .truncate()
-                                .px(px(4.0))
-                                .text_size(px(13.0))
-                                .text_color(palette.text_secondary)
-                                .child("New chat")
-                                .into_any_element()
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.0))
-                        .when(!empty, |d| {
-                            d.child(
-                                div()
-                                    .id("stage-detail-pill")
-                                    .px(px(7.0))
-                                    .py(px(5.0))
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(palette.bg_hover))
-                                    .text_size(px(12.0))
-                                    .text_color(palette.text_secondary)
-                                    .on_click(
-                                        cx.listener(|this, _, _, cx| this.cycle_detail_level(cx)),
-                                    )
-                                    .child(view.prefs.detail_level.label()),
-                            )
-                            .child(
-                                div()
-                                    .id("stage-side-question-btn")
-                                    .px(px(7.0))
-                                    .py(px(5.0))
-                                    .rounded_md()
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(palette.bg_hover))
-                                    .when(view.session.side_question.open, |d| {
-                                        d.bg(palette.bg_selected)
-                                    })
-                                    .text_size(px(12.0))
-                                    .text_color(palette.text_secondary)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.toggle_side_question(window, cx);
-                                    }))
-                                    .child("/btw"),
-                            )
-                        })
-                        .when(attached && subagent_count > 0, |d| {
-                            d.child(
-                                div()
-                                    .id("session-subagents")
-                                    .debug_selector(|| "session-subagents".to_owned())
-                                    .px(px(7.0))
-                                    .py(px(5.0))
-                                    .rounded_md()
-                                    .flex()
-                                    .items_center()
-                                    .gap(px(5.0))
-                                    .cursor_pointer()
-                                    .hover(|s| s.bg(palette.bg_hover))
-                                    .text_size(px(12.0))
-                                    .text_color(palette.text_secondary)
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.set_inspector_tab(InspectorTab::Agents, window, cx);
-                                    }))
-                                    .child(Icon::GitBranch.render(13.0, palette.text_secondary))
-                                    .child(format!("Subagents {subagent_count}")),
-                            )
-                        })
-                        .child(
-                            div()
-                                .id("stage-toggle-inspector-btn")
-                                .px(px(8.0))
-                                .py(px(5.0))
-                                .rounded_md()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.0))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(palette.bg_hover))
-                                .when(view.prefs.inspector_open, |d| d.bg(palette.bg_selected))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_inspector(window, cx);
-                                }))
-                                .child(Icon::Layers.render(14.0, palette.text_secondary))
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(palette.text_secondary)
-                                        .child("Inspector"),
-                                ),
-                        ),
-                ),
-        )
-        // Active Goal Banner (when active)
-        .when_some(
-            view.session
-                .goal
-                .as_ref()
-                .filter(|g| g.active || g.objective.is_some()),
-            |d, goal| {
-                let status_txt = goal.status.slug();
-                let used = goal.tokens_used;
-                let budget = goal.token_budget;
-                let obj_text = goal.objective.as_deref().unwrap_or("Active goal");
-                d.child(
-                    div()
-                        .w_full()
-                        .px(px(20.0))
-                        .py(px(7.0))
-                        .border_b_1()
-                        .border_color(palette.border_subtle)
-                        .bg(palette.accent_soft)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(12.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .overflow_hidden()
-                                .child(Icon::Target.render(14.0, palette.accent))
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(palette.text_primary)
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(truncate_chars(obj_text, 76)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .font_family(font_mono())
-                                .text_size(px(11.0))
-                                .text_color(palette.accent)
-                                .child(match budget {
-                                    Some(b) if b > 0 => format!(
-                                        "{status_txt} · {} / {}",
-                                        format_tokens_compact(used),
-                                        format_tokens_compact(b)
-                                    ),
-                                    _ => format!("{status_txt} · {}", format_tokens_compact(used)),
-                                }),
-                        ),
-                )
-            },
-        )
-        // `/btw` Parallel Side-Question Drawer
-        .when(view.session.side_question.open, |d| {
-            d.child(render_side_question_bar(view, palette, cx))
-        })
-        .when(empty, |stage| {
-            stage.child(render_welcome_empty_state(view, palette, cx))
-        })
-        .when(!empty, |stage| {
-            stage
-                .child(
-                    div()
-                        .relative()
-                        .flex_1()
-                        .min_h_0()
-                        .flex()
-                        .flex_col()
-                        .child(render_transcript_scroll(view, palette, cx))
-                        .when(
-                            !view.follow_tail
-                                && view.transcript_scroll.max_offset().height > px(40.0),
-                            |d| {
-                                d.child(
-                                    div()
-                                        .id("jump-to-bottom")
-                                        .debug_selector(|| "jump-to-bottom".to_owned())
-                                        .absolute()
-                                        .bottom(px(8.0))
-                                        .right(px(24.0))
-                                        .occlude()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(5.0))
-                                        .px(px(12.0))
-                                        .py(px(6.0))
-                                        .rounded_full()
-                                        .bg(palette.bg_elevated)
-                                        .border_1()
-                                        .border_color(palette.border_subtle)
-                                        .text_size(px(12.0))
-                                        .text_color(palette.text_primary)
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(palette.bg_hover))
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.jump_to_bottom(window, cx);
-                                        }))
-                                        .child(Icon::ArrowDown.render(13.0, palette.text_secondary))
-                                        .child("Jump to bottom"),
-                                )
-                            },
-                        ),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .px(px(24.0))
-                        .pt(px(8.0))
-                        .pb(px(20.0))
-                        .child(render_composer(view, palette, cx)),
-                )
-        })
-        .into_any_element()
-}
-
-fn render_welcome_empty_state(
-    view: &PrimeDesktopView,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let starters = [
-        (
-            Icon::Layers,
-            "Explore this project",
-            "Walk me through this project's structure and its main entry points.",
-        ),
-        (
-            Icon::GitBranch,
-            "Review changes",
-            "Review my uncommitted changes. What should I look at before committing?",
-        ),
-    ];
-    let has_draft =
-        !view.composer_input.read(cx).text().is_empty() || !view.staged_images.is_empty();
-
-    // Put the flexible space on the scroll viewport itself. The content keeps its
-    // intrinsic height when a short window or the command list needs scrolling.
-    let mut bottom_space = div().flex_1();
-    bottom_space.style().flex_grow = Some(1.6);
-    div()
-        .id("welcome-stage")
-        .flex_1()
-        .min_h_0()
-        .overflow_y_scroll()
-        .flex()
-        .flex_col()
-        .items_center()
-        .px(px(24.0))
-        .py(px(20.0))
-        .child(div().flex_1())
-        .child(
-            div()
-                .w_full()
-                .max_w(px(720.0))
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap(px(18.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(12.0))
-                        .child(Icon::Prime.render(30.0, palette.accent))
-                        .child(
-                            div()
-                                .font_family(font_serif())
-                                .text_size(px(34.0))
-                                .line_height(px(42.0))
-                                .text_color(palette.text_primary)
-                                .child("What are we working on?"),
-                        ),
-                )
-                .child(render_composer(view, palette, cx))
-                .child(
-                    div()
-                        .min_h(px(32.0))
-                        .flex()
-                        .flex_wrap()
-                        .items_center()
-                        .gap(px(8.0))
-                        .when(!has_draft, |row| {
-                            row.children(starters.into_iter().enumerate().map(
-                                |(i, (icon, label, prompt))| {
-                                    div()
-                                        .id(("starter", i))
-                                        .px(px(9.0))
-                                        .py(px(6.0))
-                                        .rounded_md()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(7.0))
-                                        .cursor_pointer()
-                                        .hover(|s| s.bg(palette.bg_hover))
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            this.populate_draft(prompt, window, cx);
-                                        }))
-                                        .child(icon.render(14.0, palette.text_muted))
-                                        .child(
-                                            div()
-                                                .text_size(px(12.5))
-                                                .text_color(palette.text_secondary)
-                                                .child(label),
-                                        )
-                                },
+                        .grow(1.)
+                        .min_w(0.)
+                        .truncate(),
+                    )
+                    .child(label(status, 11., p.accent)),
+            );
+        }
+        if self.session.side_question.open {
+            stage = stage.child(self.side_question_bar(p));
+        }
+        if self.session.entries.is_empty() && !self.session.is_streaming {
+            return stage.child(self.welcome(p));
+        }
+        let viewport = format!("transcript-scroll-{}", self.session.active_session_id);
+        // Rune retains the reading position by turn key and follows streaming text only
+        // while the reader is at the bottom. A newly attached session gets a new viewport.
+        let count = self.session.entries.len() + usize::from(self.session.is_streaming);
+        let turns = col()
+            .key("transcript-rows")
+            .growth(GrowthSpec::default())
+            .virtual_rows(count, 90., turn_key, move |s: &Self, i| {
+                let content = s.session.entries.get(i).map_or_else(
+                    || {
+                        row()
+                            .key("live-working-row")
+                            .center_y()
+                            .gap(8.)
+                            .child(el().size(7., 7.).radius(4.).fill(p.accent))
+                            .child(label(
+                                s.session
+                                    .working_note
+                                    .as_deref()
+                                    .unwrap_or("Prime Agent is working…"),
+                                12.5,
+                                p.text_secondary,
                             ))
-                        }),
-                ),
+                    },
+                    |entry| s.turn(entry, p),
+                );
+                col()
+                    .w_full()
+                    .items_center()
+                    .px(24.)
+                    .py(7.)
+                    .child(col().w_full().max_w(720.).min_w(0.).child(content))
+            });
+        stage = stage.child(
+            col()
+                .key(&viewport)
+                .grow(1.)
+                .min_h(0.)
+                .w_full()
+                .scroll(ScrollSpec { stick_bottom: true })
+                .scroll_anchor()
+                .on_at_bottom(|s: &mut Self, at_bottom| s.follow_tail = at_bottom)
+                .child(turns),
+        );
+        if !self.follow_tail {
+            stage = stage.child(
+                control("jump-to-bottom", "Jump to bottom", p)
+                    .self_center()
+                    .fill(p.bg_elevated)
+                    .child(Icon::ArrowDown.render(14., p.text_secondary))
+                    .child(label("Jump to bottom", 12., p.text_secondary))
+                    .on_press_tx(move |s: &mut Self, tx| {
+                        s.follow_tail = true;
+                        tx.scroll_to_bottom(&viewport);
+                    }),
+            );
+        }
+        stage.child(
+            col()
+                .w_full()
+                .items_center()
+                .px(24.)
+                .pt(8.)
+                .pb(16.)
+                .child(col().w_full().max_w(720.).child(composer(self, p))),
         )
-        .child(bottom_space)
-        .into_any_element()
-}
+    }
 
-#[allow(clippy::too_many_lines)]
-fn render_transcript_scroll(
-    view: &PrimeDesktopView,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let detail = view.prefs.detail_level;
-    let mut rows: Vec<AnyElement> = Vec::with_capacity(view.session.entries.len() + 1);
+    fn stage_header(&self, cx: &Cx<Self>, p: Palette) -> El {
+        let attached = !self.session.active_session_id.is_empty();
+        let mut left = row().grow(1.).min_w(0.).items_center().gap(4.);
+        if !self.prefs.sidebar_open {
+            left = left
+                .child(
+                    icon_control("stage-open-sidebar-btn", "Show sidebar", Icon::Sidebar, p)
+                        .on_press(Self::toggle_sidebar),
+                )
+                .child(
+                    icon_control("stage-new-chat", "New chat", Icon::Compose, p)
+                        .on_press(Self::start_fresh_session),
+                );
+        }
+        if let Some(parent) = self.parent_session_target() {
+            left = left.child(
+                control("subagent-parent", "Parent chat", p)
+                    .child(Icon::GitBranch.render(13., p.text_muted))
+                    .child(label("Parent chat", 12., p.text_secondary))
+                    .on_press(move |s: &mut Self| {
+                        s.open_session(BridgeRequest::AttachSession {
+                            active_session_id: parent.clone(),
+                        })
+                    }),
+            );
+        } else {
+            let cwd = self.current_project();
+            left = left.child(
+                control("stage-project-folder", "Show project", p)
+                    .help(format!("Show project: {cwd}"))
+                    .disabled(cwd.is_empty())
+                    .child(Icon::Folder.render(13., p.text_muted))
+                    .child(
+                        label(folder_label(cwd), 12., p.text_secondary)
+                            .max_w(130.)
+                            .truncate(),
+                    )
+                    .on_press(Self::reveal_current_project),
+            );
+        }
+        left = left.child(label("/", 12., p.text_muted));
+        left = if self.renaming_session && attached {
+            left.child(
+                field("rename-input", &self.rename_input, "Session name", p, |s| {
+                    &mut s.rename_input
+                })
+                .single_line()
+                .grow(1.)
+                .min_w(0.)
+                .on_submit(|s: &mut Self, _| s.commit_rename_session(&s.rename_input.text.clone()))
+                .on_input_key(|s: &mut Self, ev, _| {
+                    if ev.key == Key::Escape {
+                        s.commit_rename_session("");
+                        return true;
+                    }
+                    false
+                }),
+            )
+        } else if attached {
+            let title = self.session.display_title();
+            left.child(
+                control("stage-session-title", "Rename chat", p)
+                    .shrink()
+                    .min_w(0.)
+                    .help(title.clone())
+                    .child(
+                        label(title, 12.5, p.text_primary)
+                            .shrink()
+                            .min_w(0.)
+                            .truncate(),
+                    )
+                    .child(Icon::EditPen.render(11., p.text_muted))
+                    .on_press(Self::begin_rename_session),
+            )
+        } else {
+            left.child(label("New chat", 12.5, p.text_muted).truncate())
+        };
 
-    for entry in &view.session.entries {
+        let mut right = row().items_center().gap(4.);
+        if !self.session.entries.is_empty() || self.session.is_streaming {
+            right = right
+                .child(
+                    control("stage-detail-pill", "Change transcript detail", p)
+                        .child(label(
+                            self.prefs.detail_level.label(),
+                            12.,
+                            p.text_secondary,
+                        ))
+                        .on_press(Self::cycle_detail_level),
+                )
+                .child(
+                    control("stage-side-question-btn", "Side question", p)
+                        .child(label("/btw", 12., p.text_secondary))
+                        .on_press(Self::toggle_side_question),
+                );
+        }
+        if attached && !self.rlm_children.rows.is_empty() {
+            right = right.child(
+                control("session-subagents", "Inspect subagents", p)
+                    .child(Icon::GitBranch.render(13., p.text_secondary))
+                    .child(label(
+                        format!("Subagents {}", self.rlm_children.rows.len()),
+                        12.,
+                        p.text_secondary,
+                    ))
+                    .on_press(|s: &mut Self| s.set_inspector_tab(InspectorTab::Agents)),
+            );
+        }
+        let inspect = control("stage-toggle-inspector-btn", "Toggle inspector", p)
+            .child(Icon::Layers.render(14., p.text_secondary))
+            .child(label("Inspector", 12., p.text_secondary))
+            .on_press(Self::toggle_inspector);
+        right = right.child(if self.prefs.inspector_open {
+            inspect.fill(p.bg_selected)
+        } else {
+            inspect
+        });
+        let inset = if self.prefs.sidebar_open {
+            0.
+        } else {
+            cx.titlebar_inset()
+        };
+        row()
+            .w_full()
+            .h(52.)
+            .px(15.)
+            .pl(inset.max(15.))
+            .items_center()
+            .gap(8.)
+            .child(left)
+            .child(right)
+    }
+
+    fn welcome(&self, p: Palette) -> El {
+        let heading = row()
+            .gap(12.)
+            .center_y()
+            .child(Icon::Prime.render(30., p.accent))
+            .child(
+                text("What are we working on?")
+                    .font(
+                        TextStyle::new(34., 450.)
+                            .family(Family::Named(font_display()))
+                            .lh(42.)
+                            .tracking(-0.8),
+                    )
+                    .color(p.text_primary)
+                    .min_w(0.)
+                    .wrap(),
+            );
+        let mut starters = row().min_h(32.).gap(8.).flex_wrap();
+        if self.composer_input.text.is_empty() && self.staged_images.is_empty() {
+            for (key, icon, title, prompt) in [
+                (
+                    "explore-project",
+                    Icon::Layers,
+                    "Explore this project",
+                    "Walk me through this project's structure and its main entry points.",
+                ),
+                (
+                    "review-changes",
+                    Icon::GitBranch,
+                    "Review changes",
+                    "Review my uncommitted changes. What should I look at before committing?",
+                ),
+            ] {
+                starters = starters.child(
+                    control(key, title, p)
+                        .child(icon.render(14., p.text_muted))
+                        .child(label(title, 12.5, p.text_secondary))
+                        .on_press(move |s: &mut Self| s.populate_draft(prompt)),
+                );
+            }
+        }
+        let content = col()
+            .w_full()
+            .max_w(720.)
+            .gap(18.)
+            .child(heading)
+            .child(composer(self, p))
+            .child(starters);
+        col()
+            .key("welcome-stage")
+            .grow(1.)
+            .min_h(0.)
+            .scroll(ScrollSpec {
+                stick_bottom: false,
+            })
+            .items_center()
+            .px(24.)
+            .py(20.)
+            .child(el().grow(1.))
+            .child(content)
+            .child(el().grow(1.6))
+    }
+
+    fn side_question_bar(&self, p: Palette) -> El {
+        let q = &self.session.side_question;
+        let mut form = row()
+            .w_full()
+            .items_center()
+            .gap(6.)
+            .child(label("/btw", 13., p.info))
+            .child(
+                field(
+                    "side-question-input",
+                    &self.side_question_input,
+                    "Ask a side question…",
+                    p,
+                    |s| &mut s.side_question_input,
+                )
+                .single_line()
+                .grow(1.)
+                .on_submit(|s: &mut Self, _| s.submit_side_question()),
+            )
+            .child(
+                control("sq-ask-btn", "Ask side question", p)
+                    .fill(p.info_soft)
+                    .child(label("Ask", 12., p.info))
+                    .on_press(Self::submit_side_question),
+            );
+        if let Some(id) = &q.running_id {
+            let id = id.clone();
+            form = form.child(
+                control("sq-stop-btn", "Stop side question", p)
+                    .child(label("Stop", 12., p.danger))
+                    .on_press(move |s: &mut Self| {
+                        s.bridge.send(BridgeRequest::AbortSideQuestion {
+                            active_session_id: s.session.active_session_id.clone(),
+                            side_question_id: id.clone(),
+                        })
+                    }),
+            );
+        }
+        let mut bar = col()
+            .w_full()
+            .px(18.)
+            .py(6.)
+            .gap(5.)
+            .fill(p.bg_elevated)
+            .child(
+                form.child(
+                    icon_control("sq-close", "Close side question", Icon::Close, p)
+                        .on_press(Self::toggle_side_question),
+                ),
+            );
+        if !q.answer.is_empty() {
+            bar = bar
+                .child(
+                    col()
+                        .key("sq-answer-scroll")
+                        .max_h(150.)
+                        .min_h(22.)
+                        .scroll(ScrollSpec { stick_bottom: true })
+                        .child(render_markdown(
+                            "sq-answer",
+                            &q.answer,
+                            q.running_id.is_some(),
+                            p,
+                        )),
+                )
+                .child(copy_button("sq-copy", &q.answer, p).self_end());
+        }
+        if let Some(error) = &q.error {
+            bar = bar.child(label(error, 12., p.danger).wrap_anywhere().selectable(true));
+        }
+        bar
+    }
+
+    fn turn(&self, entry: &TranscriptEntry, p: Palette) -> El {
         match entry {
             TranscriptEntry::User {
                 key,
@@ -524,59 +417,40 @@ fn render_transcript_scroll(
                 skill_name,
                 image_count,
             } => {
-                rows.push(
-                    div()
-                        .id(SharedString::from(key.clone()))
-                        .w_full()
-                        .flex()
-                        .justify_end()
-                        .pt(px(6.0))
+                let mut bubble = col()
+                    .key(key)
+                    .self_end()
+                    .max_w(640.)
+                    .gap(5.)
+                    .radius(12.)
+                    .px(14.)
+                    .py(9.)
+                    .fill(p.bg_user_bubble);
+                if let Some(skill) = skill_name {
+                    bubble = bubble.child(
+                        pill(&format!("skill · {skill}"), p.accent_soft, p.accent).self_start(),
+                    );
+                }
+                if *image_count > 0 {
+                    bubble = bubble.child(label(
+                        format!("{image_count} image(s) attached"),
+                        11.5,
+                        p.info,
+                    ));
+                }
+                if !text.is_empty() {
+                    bubble = bubble
                         .child(
-                            div()
-                                .max_w(px(620.0))
-                                .px(px(15.0))
-                                .py(px(10.5))
-                                .rounded_2xl()
-                                .bg(palette.bg_user_bubble)
-                                .border_1()
-                                .border_color(palette.border_subtle)
-                                .flex()
-                                .flex_col()
-                                .gap(px(6.0))
-                                .when_some(skill_name.as_ref(), |d, sname| {
-                                    d.child(pill(
-                                        &format!("skill · {sname}"),
-                                        palette.accent_soft,
-                                        palette.accent,
-                                    ))
-                                })
-                                .when(*image_count > 0, |d| {
-                                    d.child(pill(
-                                        &format!("{image_count} image(s) attached"),
-                                        palette.info_soft,
-                                        palette.info,
-                                    ))
-                                })
-                                .child(
-                                    div()
-                                        .font_family(font_sans())
-                                        .text_size(px(14.5))
-                                        .line_height(px(22.0))
-                                        .text_color(palette.text_primary)
-                                        .child(SelectableText::new(
-                                            format!("{key}-text"),
-                                            text.clone(),
-                                            palette,
-                                        )),
-                                )
-                                .child(div().flex().justify_end().child(copy_button(
-                                    format!("{key}-copy"),
-                                    text.clone(),
-                                    palette,
-                                ))),
+                            label(text, 15., p.text_primary)
+                                .key(format!("{key}-text"))
+                                .font(TextStyle::new(15., 400.).lh(22.))
+                                .wrap_anywhere()
+                                .selectable(true)
+                                .selection_color(p.selection_bg),
                         )
-                        .into_any_element(),
-                );
+                        .child(copy_button(&format!("{key}-copy"), text, p).self_end());
+                }
+                col().w_full().items_end().child(bubble)
             }
             TranscriptEntry::Assistant {
                 key,
@@ -585,138 +459,59 @@ fn render_transcript_scroll(
                 error,
                 ..
             } => {
-                let mut block_els: Vec<AnyElement> = Vec::new();
-                for (b_idx, block) in blocks.iter().enumerate() {
+                let mut message = col().key(key).w_full().min_w(0.).gap(7.);
+                let mut reply = Vec::new();
+                for (i, block) in blocks.iter().enumerate() {
                     match block {
-                        AssistantBlock::Thinking(thought) => {
-                            let t_key = format!("{key}-think-{b_idx}");
-                            let toggle_t_key = t_key.clone();
-                            let open = view.session.is_expanded(&t_key, detail.show_thinking());
-                            block_els.push(
-                                div()
-                                    .w_full()
-                                    .rounded_lg()
-                                    .border_1()
-                                    .border_color(palette.border_subtle)
-                                    .bg(palette.bg_elevated.opacity(0.6))
-                                    .overflow_hidden()
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!("{t_key}-hdr")))
-                                            .px(px(11.0))
-                                            .py(px(6.0))
-                                            .cursor_pointer()
-                                            .hover(|s| s.bg(palette.bg_hover))
-                                            .flex()
-                                            .items_center()
-                                            .gap(px(6.0))
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.session.set_expanded(&toggle_t_key, !open);
-                                                cx.notify();
-                                            }))
-                                            .child(
-                                                if open {
-                                                    Icon::ChevronDown
-                                                } else {
-                                                    Icon::ChevronRight
-                                                }
-                                                .render(12.5, palette.text_muted),
-                                            )
-                                            .child(
-                                                div()
-                                                    .text_size(px(12.0))
-                                                    .font_family(font_sans())
-                                                    .text_color(palette.text_muted)
-                                                    .child(if *streaming {
-                                                        "Thinking…"
-                                                    } else {
-                                                        "Thought process"
-                                                    }),
-                                            ),
-                                    )
-                                    .when(open, |d| {
-                                        d.child(
-                                            div()
-                                                .px(px(13.0))
-                                                .pb(px(10.0))
-                                                .pt(px(4.0))
-                                                .border_t_1()
-                                                .border_color(palette.border_subtle)
-                                                .text_size(px(13.0))
-                                                .line_height(px(20.0))
-                                                .text_color(palette.text_secondary)
-                                                .child(render_markdown_streaming(
-                                                    &t_key, thought, *streaming, palette,
-                                                )),
-                                        )
-                                    })
-                                    .into_any_element(),
-                            );
-                        }
-                        AssistantBlock::Text(md) => {
-                            block_els.push(render_markdown_streaming(
-                                &format!("{key}-md-{b_idx}"),
-                                md,
+                        AssistantBlock::Text(body) => {
+                            reply.push(body.as_str());
+                            message = message.child(render_markdown(
+                                &format!("{key}-body-{i}"),
+                                body,
                                 *streaming,
-                                palette,
+                                p,
                             ));
+                        }
+                        AssistantBlock::Thinking(body) => {
+                            let id = format!("{key}-think-{i}");
+                            let open = self
+                                .session
+                                .is_expanded(&id, self.prefs.detail_level.show_thinking());
+                            message = message.child(
+                                disclosure(
+                                    &id,
+                                    if *streaming {
+                                        "Thinking…"
+                                    } else {
+                                        "Thinking"
+                                    },
+                                    open,
+                                    p,
+                                )
+                                .self_start(),
+                            );
+                            if open {
+                                message = message.child(
+                                    col()
+                                        .px(12.)
+                                        .child(render_markdown(&id, body, *streaming, p)),
+                                );
+                            }
                         }
                     }
                 }
-                if let Some(err_msg) = error {
-                    block_els.push(
-                        div()
-                            .px(px(12.0))
-                            .py(px(8.0))
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(palette.danger)
-                            .bg(palette.danger_soft)
-                            .text_size(px(13.0))
-                            .text_color(palette.danger)
-                            .child(SelectableText::new(
-                                format!("{key}-error"),
-                                err_msg.clone(),
-                                palette,
-                            ))
-                            .into_any_element(),
+                if let Some(error) = error {
+                    message =
+                        message.child(label(error, 13., p.danger).wrap_anywhere().selectable(true));
+                }
+                if !reply.is_empty() && !streaming {
+                    message = message.child(
+                        copy_button(&format!("{key}-copy"), &reply.join("\n\n"), p).self_start(),
                     );
                 }
-                // Copy the reply's source Markdown, omitting the separate reasoning trace.
-                let reply = blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        AssistantBlock::Text(text) => Some(text.as_str()),
-                        AssistantBlock::Thinking(_) => None,
-                    })
-                    .chain(error.as_deref())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                rows.push(
-                    div()
-                        .id(SharedString::from(key.clone()))
-                        .w_full()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(8.0))
-                        .children(block_els)
-                        .when(!reply.is_empty(), |d| {
-                            d.child(div().flex().child(copy_button(
-                                format!("{key}-copy"),
-                                reply,
-                                palette,
-                            )))
-                        })
-                        .into_any_element(),
-                );
+                message
             }
-            TranscriptEntry::Tool(card) => {
-                let t_key = format!("tool-{}", card.id);
-                let default_open = detail.expand_tool_output() || card.is_error;
-                let expanded = view.session.is_expanded(&t_key, default_open);
-                rows.push(render_tool_card(card, detail, expanded, palette, cx));
-            }
+            TranscriptEntry::Tool(card) => render_tool_card(self, card, p),
             TranscriptEntry::UserBash {
                 key,
                 command,
@@ -725,95 +520,47 @@ fn render_transcript_scroll(
                 exit_code,
                 cancelled,
             } => {
-                let toggle_k = key.clone();
-                let open = view.session.is_expanded(key, true);
-                let badge = if *running {
-                    ("Running…".to_string(), palette.warning)
+                let open = self.session.is_expanded(key, true);
+                let status = if *running {
+                    "Running…".into()
                 } else if *cancelled {
-                    ("Cancelled".to_string(), palette.danger)
+                    "Cancelled".into()
                 } else {
-                    match exit_code {
-                        Some(0) => ("exit 0".to_string(), palette.success),
-                        Some(c) => (format!("exit {c}"), palette.danger),
-                        None => ("done".to_string(), palette.text_muted),
-                    }
+                    exit_code.map_or_else(|| "Done".into(), |code| format!("Exit {code}"))
                 };
-                rows.push(
-                    div()
-                        .w_full()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(palette.border_subtle)
-                        .bg(palette.bg_elevated)
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("{key}-hdr")))
-                                .px(px(12.0))
-                                .py(px(7.5))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(palette.bg_hover))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.session.set_expanded(&toggle_k, !open);
-                                    cx.notify();
-                                }))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .min_w_0()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .child(Icon::Terminal.render(13.0, palette.warning))
-                                        .child(
-                                            div()
-                                                .font_family(font_mono())
-                                                .text_size(px(12.5))
-                                                .text_color(palette.text_primary)
-                                                .min_w_0()
-                                                .truncate()
-                                                .child(format!("$ {command}")),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_none()
-                                        .items_center()
-                                        .gap(px(5.0))
-                                        .child(copy_button(
-                                            format!("{key}-copy"),
-                                            if output.is_empty() {
-                                                format!("$ {command}")
-                                            } else {
-                                                format!("$ {command}\n{}", strip_ansi(output))
-                                            },
-                                            palette,
-                                        ))
-                                        .child(
-                                            div()
-                                                .whitespace_nowrap()
-                                                .font_family(font_mono())
-                                                .text_size(px(11.5))
-                                                .text_color(badge.1)
-                                                .child(badge.0),
-                                        ),
-                                ),
-                        )
-                        .when(open && !output.is_empty(), |d| {
-                            d.child(render_console_output(
-                                key,
-                                "output",
-                                output,
-                                200,
-                                *cancelled || exit_code.is_some_and(|c| c != 0),
-                                palette,
-                            ))
-                        })
-                        .into_any_element(),
-                );
+                let mut card = col()
+                    .key(key)
+                    .padding(8.)
+                    .radius(8.)
+                    .border(1., p.border_subtle)
+                    .fill(p.bg_elevated)
+                    .child(
+                        row()
+                            .center_y()
+                            .justify_between()
+                            .child(
+                                disclosure(key, &format!("$ {command}"), open, p)
+                                    .min_w(0.)
+                                    .shrink(),
+                            )
+                            .child(label(status, 11.5, p.warning)),
+                    );
+                if open && !output.is_empty() {
+                    card = card.child(console(
+                        self,
+                        &format!("{key}-output"),
+                        "Output",
+                        output,
+                        None,
+                        if self.prefs.detail_level.expand_tool_output() {
+                            120
+                        } else {
+                            18
+                        },
+                        p,
+                    ));
+                }
+                card
             }
             TranscriptEntry::AgentMail {
                 key,
@@ -821,18 +568,28 @@ fn render_transcript_scroll(
                 counterpart,
                 body,
             } => {
-                let open = view
+                let headline = match kind {
+                    MailKind::Received => format!("Agent message from {counterpart}"),
+                    MailKind::Sent => format!("Agent message to {counterpart}"),
+                    MailKind::ChildCompleted => format!("Subagent {counterpart} completed"),
+                    MailKind::ChildCancelled => format!("Subagent {counterpart} cancelled"),
+                    MailKind::ChildFailed => format!("Subagent {counterpart} failed"),
+                };
+                let open = self
                     .session
-                    .is_expanded(key, detail != DetailLevel::Overview);
-                rows.push(render_agent_mail_card(
-                    key,
-                    *kind,
-                    counterpart,
-                    body,
-                    open,
-                    palette,
-                    cx,
-                ));
+                    .is_expanded(key, self.prefs.detail_level != DetailLevel::Overview);
+                let mut card = col()
+                    .key(key)
+                    .gap(6.)
+                    .px(9.)
+                    .py(5.)
+                    .radius(7.)
+                    .fill(p.info_soft)
+                    .child(disclosure(key, &headline, open, p).self_start());
+                if open {
+                    card = card.child(render_markdown(&format!("{key}-mail"), body, false, p));
+                }
+                card
             }
             TranscriptEntry::Compaction {
                 key,
@@ -841,129 +598,66 @@ fn render_transcript_scroll(
                 summary,
                 tokens_before,
             } => {
-                let toggle_k = key.clone();
-                let open = view.session.is_expanded(key, *streaming);
-                rows.push(
-                    div()
-                        .w_full()
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(palette.border_subtle)
-                        .bg(palette.bg_elevated)
-                        .overflow_hidden()
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("{key}-hdr")))
-                                .px(px(12.0))
-                                .py(px(7.5))
-                                .cursor_pointer()
-                                .hover(|s| s.bg(palette.bg_hover))
-                                .flex()
-                                .items_center()
-                                .justify_between()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.session.set_expanded(&toggle_k, !open);
-                                    cx.notify();
-                                }))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(8.0))
-                                        .child(pill(
-                                            "Compact",
-                                            palette.warning_soft,
-                                            palette.warning,
-                                        ))
-                                        .child(
-                                            div()
-                                                .text_size(px(12.5))
-                                                .text_color(palette.text_primary)
-                                                .child(if *streaming {
-                                                    format!("Compacting context ({reason})…")
-                                                } else {
-                                                    "Context compacted".to_string()
-                                                }),
-                                        ),
-                                )
-                                .when_some(*tokens_before, |d, tb| {
-                                    d.child(
-                                        div()
-                                            .font_family(font_mono())
-                                            .text_size(px(11.0))
-                                            .text_color(palette.text_muted)
-                                            .child(format!("was {}", format_tokens_compact(tb))),
-                                    )
-                                }),
-                        )
-                        .when(open && !summary.trim().is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .p(px(12.0))
-                                    .border_t_1()
-                                    .border_color(palette.border_subtle)
-                                    .child(render_markdown(
-                                        &format!("{key}-sum"),
-                                        summary,
-                                        palette,
-                                    )),
-                            )
-                        })
-                        .into_any_element(),
-                );
+                let open = self.session.is_expanded(key, *streaming);
+                let title = if *streaming {
+                    format!("Compacting context ({reason})…")
+                } else {
+                    "Context compacted".into()
+                };
+                let mut header = row()
+                    .center_y()
+                    .gap(8.)
+                    .child(disclosure(key, &title, open, p));
+                if let Some(tokens) = tokens_before {
+                    header = header.child(label(
+                        format!("was {}", format_tokens_compact(*tokens)),
+                        11.5,
+                        p.text_muted,
+                    ));
+                }
+                let mut card = col()
+                    .key(key)
+                    .gap(6.)
+                    .padding(7.)
+                    .radius(8.)
+                    .fill(p.bg_sidebar)
+                    .child(header);
+                if open {
+                    card = card.child(render_markdown(
+                        &format!("{key}-summary"),
+                        summary,
+                        *streaming,
+                        p,
+                    ));
+                }
+                card
             }
             TranscriptEntry::Refinement {
                 key,
                 summary,
                 changes,
             } => {
-                rows.push(
-                    div()
-                        .id(SharedString::from(key.clone()))
-                        .w_full()
-                        .p(px(12.0))
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(palette.accent.opacity(0.4))
-                        .bg(palette.accent_soft)
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(7.0))
-                                .child(Icon::Sparkles.render(13.5, palette.accent))
-                                .child(
-                                    div()
-                                        .text_size(px(12.5))
-                                        .font_weight(FontWeight::SEMIBOLD)
-                                        .text_color(palette.text_primary)
-                                        .child("Continual Harness refined"),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(palette.text_secondary)
-                                .child(render_markdown(
-                                    &format!("{key}-summary"),
-                                    summary,
-                                    palette,
-                                )),
-                        )
-                        .when(!changes.is_empty(), |d| {
-                            d.child(
-                                div().flex().flex_wrap().gap(px(5.0)).children(
-                                    changes
-                                        .iter()
-                                        .map(|c| pill(c, palette.bg_elevated, palette.accent)),
-                                ),
-                            )
-                        })
-                        .into_any_element(),
-                );
+                let mut card = col()
+                    .key(key)
+                    .gap(5.)
+                    .padding(10.)
+                    .radius(8.)
+                    .fill(p.accent_soft)
+                    .child(label("Continual Harness refined", 12., p.accent))
+                    .child(render_markdown(
+                        &format!("{key}-summary"),
+                        summary,
+                        false,
+                        p,
+                    ));
+                for change in changes {
+                    card = card.child(
+                        label(change, 12.5, p.text_secondary)
+                            .wrap_anywhere()
+                            .selectable(true),
+                    );
+                }
+                card
             }
             TranscriptEntry::Notice {
                 key,
@@ -971,284 +665,47 @@ fn render_transcript_scroll(
                 body,
                 is_error,
             } => {
-                rows.push(
-                    div()
-                        .id(SharedString::from(key.clone()))
-                        .w_full()
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(if *is_error {
-                            palette.danger
+                let mut notice = col()
+                    .key(key)
+                    .gap(5.)
+                    .padding(10.)
+                    .radius(8.)
+                    .fill(if *is_error {
+                        p.danger_soft
+                    } else {
+                        p.bg_sidebar
+                    })
+                    .child(label(
+                        title,
+                        12.5,
+                        if *is_error {
+                            p.danger
                         } else {
-                            palette.border_subtle
-                        })
-                        .bg(if *is_error {
-                            palette.danger_soft
-                        } else {
-                            palette.bg_elevated
-                        })
-                        .flex()
-                        .flex_col()
-                        .gap(px(3.0))
-                        .child(
-                            div()
-                                .font_family(font_mono())
-                                .text_size(px(11.0))
-                                .text_color(if *is_error {
-                                    palette.danger
-                                } else {
-                                    palette.text_muted
-                                })
-                                .child(title.to_uppercase()),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(12.5))
-                                .text_color(if *is_error {
-                                    palette.danger
-                                } else {
-                                    palette.text_secondary
-                                })
-                                .child(SelectableText::new(
-                                    format!("{key}-body"),
-                                    body.clone(),
-                                    palette,
-                                )),
-                        )
-                        .into_any_element(),
-                );
+                            p.text_secondary
+                        },
+                    ));
+                if !body.is_empty() {
+                    notice =
+                        notice.child(render_markdown(&format!("{key}-notice"), body, false, p));
+                }
+                notice
             }
         }
     }
-
-    // Live working indicator row at the tail of an active turn.
-    if view.session.is_streaming {
-        let note = view
-            .session
-            .working_note
-            .as_deref()
-            .unwrap_or("Prime Agent is working…");
-        rows.push(
-            div()
-                .id("live-working-row")
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .py(px(6.0))
-                .child(
-                    div()
-                        .w(px(8.0))
-                        .h(px(8.0))
-                        .rounded_full()
-                        .bg(palette.accent),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.5))
-                        .font_family(font_sans())
-                        .text_color(palette.text_secondary)
-                        .child(note.to_string()),
-                )
-                .into_any_element(),
-        );
-    }
-
-    div()
-        .id("transcript-scroll-container")
-        .flex_1()
-        .overflow_y_scroll()
-        .map(|mut scroll| {
-            // A horizontal swipe over code should only move that code's scroll pane.
-            scroll.style().restrict_scroll_to_axis = Some(true);
-            scroll
-        })
-        .track_scroll(&view.transcript_scroll)
-        .on_scroll_wheel(cx.listener(PrimeDesktopView::on_transcript_wheel))
-        .min_h_0()
-        .px(px(24.0))
-        .py(px(20.0))
-        .flex()
-        .flex_col()
-        .items_center()
-        .child(
-            div()
-                .w_full()
-                .id(SharedString::from(format!(
-                    "transcript-{}",
-                    view.session.active_session_id
-                )))
-                .max_w(px(720.0))
-                .min_w_0()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .gap(px(18.0))
-                .children(rows),
-        )
-        .into_any_element()
 }
 
-fn render_side_question_bar(
-    view: &PrimeDesktopView,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let sq = &view.session.side_question;
-    div()
-        .w_full()
-        .px(px(20.0))
-        .py(px(10.0))
-        .border_b_1()
-        .border_color(palette.border_subtle)
-        .bg(palette.bg_elevated)
-        .flex()
-        .justify_center()
-        .child(
-            div()
-                .w_full()
-                .max_w(px(720.0))
-                .flex()
-                .flex_col()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(pill("/btw", palette.accent_soft, palette.accent))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .child(view.side_question_input.clone()),
-                        )
-                        .child(
-                            div()
-                                .id("sq-ask-btn")
-                                .px(px(10.0))
-                                .py(px(4.5))
-                                .rounded_md()
-                                .bg(palette.accent)
-                                .cursor_pointer()
-                                .text_size(px(12.0))
-                                .text_color(palette.text_on_accent)
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.submit_side_question(window, cx);
-                                }))
-                                .child("Ask"),
-                        )
-                        .when_some(sq.running_id.as_ref(), |d, run_id| {
-                            let rid = run_id.clone();
-                            let sid = view.session.active_session_id.clone();
-                            d.child(
-                                div()
-                                    .id("sq-stop-btn")
-                                    .px(px(8.0))
-                                    .py(px(4.5))
-                                    .rounded_md()
-                                    .bg(palette.danger_soft)
-                                    .cursor_pointer()
-                                    .text_size(px(12.0))
-                                    .text_color(palette.danger)
-                                    .on_click(cx.listener(move |this, _, _, _cx| {
-                                        this.bridge.send(BridgeRequest::AbortSideQuestion {
-                                            active_session_id: sid.clone(),
-                                            side_question_id: rid.clone(),
-                                        });
-                                    }))
-                                    .child("Stop"),
-                            )
-                        })
-                        .child(
-                            div()
-                                .id("sq-close")
-                                .flex_none()
-                                .cursor_pointer()
-                                .p(px(5.0))
-                                .rounded_md()
-                                .hover(|s| s.bg(palette.bg_hover))
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_side_question(window, cx);
-                                }))
-                                .child(Icon::Close.render(13.0, palette.text_secondary)),
-                        ),
-                )
-                .when(!sq.answer.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .p(px(10.0))
-                            .rounded_lg()
-                            .bg(palette.bg_canvas)
-                            .border_1()
-                            .border_color(palette.border_subtle)
-                            .child(
-                                div()
-                                    .id("sq-answer-scroll")
-                                    .max_h(px(180.0))
-                                    .overflow_y_scroll()
-                                    .child(render_markdown_streaming(
-                                        "sq-ans",
-                                        &sq.answer,
-                                        sq.running_id.is_some(),
-                                        palette,
-                                    )),
-                            )
-                            .child(div().flex().justify_end().child(copy_button(
-                                "sq-copy",
-                                sq.answer.clone(),
-                                palette,
-                            ))),
-                    )
-                })
-                .when_some(sq.error.as_ref(), |d, err| {
-                    d.child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(palette.danger)
-                            .child(SelectableText::new("sq-error", err.clone(), palette)),
-                    )
-                }),
-        )
-        .into_any_element()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-    use std::time::Duration;
-
-    use gpui::{Modifiers, TestAppContext, px, size};
-
-    use crate::ui::workspace::{LaunchOptions, PrimeDesktopView};
-
-    #[test]
-    fn hovering_the_project_breadcrumb_reveals_the_working_directory() {
-        let temp = tempfile::tempdir().unwrap();
-        let cwd = PathBuf::from("/fixture")
-            .join("a-long-ancestor-directory/".repeat(12))
-            .join("project");
-        let options = LaunchOptions {
-            initial_cwd: Some(cwd),
-            daemon_socket: Some(temp.path().join("no-listener")),
-            ..Default::default()
-        };
-        let mut app = TestAppContext::single();
-        let (_, cx) = app.add_window_view(|window, cx| {
-            PrimeDesktopView::new(options, temp.path().to_path_buf(), window, cx)
-        });
-        cx.simulate_resize(size(px(960.0), px(640.0)));
-        cx.update(|window, cx| window.draw(cx).clear());
-        assert!(cx.debug_bounds("project-tooltip").is_none());
-        let breadcrumb = cx.debug_bounds("stage-project-folder").unwrap();
-        cx.simulate_mouse_move(breadcrumb.center(), None, Modifiers::none());
-        cx.executor().advance_clock(Duration::from_secs(1));
-        cx.update(|window, cx| window.draw(cx).clear());
-        let tooltip = cx
-            .debug_bounds("project-tooltip")
-            .expect("project path tooltip");
-        assert!(tooltip.size.height > px(32.0), "the full path should wrap");
-        app.quit();
+fn turn_key(s: &PrimeDesktopView, i: usize) -> Cow<'_, str> {
+    match s.session.entries.get(i) {
+        Some(
+            TranscriptEntry::User { key, .. }
+            | TranscriptEntry::Assistant { key, .. }
+            | TranscriptEntry::UserBash { key, .. }
+            | TranscriptEntry::AgentMail { key, .. }
+            | TranscriptEntry::Compaction { key, .. }
+            | TranscriptEntry::Refinement { key, .. }
+            | TranscriptEntry::Notice { key, .. },
+        ) => Cow::Borrowed(key),
+        Some(TranscriptEntry::Tool(card)) => Cow::Owned(format!("tool-{}", card.id)),
+        None => Cow::Borrowed("live-working-row"),
     }
 }

@@ -1,11 +1,6 @@
-//! Project navigation and unsent drafts. Only the daemon owns conversation history.
-use super::{
-    Context, Draft, Path, PathPromptOptions, PrimeDesktopView, SessionSelection, TextInput, Window,
-};
+//! Project navigation and per-session drafts.
+use super::{Draft, DraftKey, Path, PrimeDesktopView, SessionSelection};
 use crate::state::projects::ProjectGroup;
-use gpui::Focusable as _;
-
-use crate::state::DraftKey;
 
 impl PrimeDesktopView {
     pub(crate) fn current_project(&self) -> &str {
@@ -33,8 +28,8 @@ impl PrimeDesktopView {
         )
     }
 
-    pub(crate) fn toggle_project(&mut self, cwd: &str, cx: &mut Context<Self>) {
-        if !self.sidebar_search_input.read(cx).text().trim().is_empty() {
+    pub(crate) fn toggle_project(&mut self, cwd: &str) {
+        if !self.sidebar_search_input.text.trim().is_empty() {
             return;
         }
         let default_collapsed =
@@ -46,10 +41,9 @@ impl PrimeDesktopView {
             .or_insert(default_collapsed);
         *collapsed = !*collapsed;
         self.save_preferences();
-        cx.notify();
     }
 
-    pub(crate) fn pin_project(&mut self, cwd: &str, cx: &mut Context<Self>) {
+    pub(crate) fn pin_project(&mut self, cwd: &str) {
         let folder = Path::new(cwd);
         if cwd.is_empty()
             || self
@@ -67,10 +61,9 @@ impl PrimeDesktopView {
             pa_telemetry::DesktopProjectAction::Added,
         );
         self.save_preferences();
-        cx.notify();
     }
 
-    pub(crate) fn unpin_project(&mut self, cwd: &str, cx: &mut Context<Self>) {
+    pub(crate) fn unpin_project(&mut self, cwd: &str) {
         if !self.prefs.project_folders.iter().any(|p| p == cwd) {
             return;
         }
@@ -82,25 +75,19 @@ impl PrimeDesktopView {
         );
         self.prefs.project_collapsed.remove(cwd);
         if self.sidebar_project.as_deref() == Some(cwd) {
-            self.show_all_projects(cx);
+            self.show_all_projects();
         }
         self.save_preferences();
-        cx.notify();
     }
 
-    pub(crate) fn new_project_chat(
-        &mut self,
-        cwd: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(crate) fn new_project_chat(&mut self, cwd: &str) {
         if !matches!(self.selection, SessionSelection::Idle) || cwd.is_empty() {
             return;
         }
-        self.close_sidebar_overlay(window, cx);
+        self.close_sidebar_overlay();
         self.auto_attach = false;
-        self.stash_draft(cx);
-        self.reset_session(cx);
+        self.stash_draft();
+        self.reset_session();
         cwd.clone_into(&mut self.working_cwd);
         self.remember_project();
         if self
@@ -109,15 +96,14 @@ impl PrimeDesktopView {
             .is_some_and(|scoped| scoped != self.current_project())
         {
             let root = self.current_project().to_owned();
-            self.focus_sidebar_project(&root, cx);
+            self.focus_sidebar_project(&root);
         }
-        self.restore_draft(cx);
-        self.sidebar_search_input.update(cx, TextInput::clear);
-        window.focus(&self.composer_input.focus_handle(cx));
-        cx.notify();
+        self.restore_draft();
+        self.sidebar_search_input.replace_text("");
+        self.focus_input(|s| &mut s.composer_input);
     }
 
-    pub fn start_fresh_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn start_fresh_session(&mut self) {
         let project = if self.prefs.sidebar_open {
             self.sidebar_project
                 .as_deref()
@@ -126,34 +112,17 @@ impl PrimeDesktopView {
             self.current_project()
         }
         .to_owned();
-        self.new_project_chat(&project, window, cx);
+        self.new_project_chat(&project);
     }
 
-    pub fn prompt_choose_project_dir(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Add project".into()),
-        });
-        cx.spawn_in(window, async move |this, cx| {
-            if let Ok(Ok(Some(paths))) = rx.await
-                && let Some(folder) = paths.first()
-            {
-                let _ = this.update_in(cx, |view, window, cx| view.add_project(folder, window, cx));
-            }
-        })
-        .detach();
-    }
-
-    fn add_project(&mut self, folder: &Path, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn add_project(&mut self, folder: &Path) {
         if !matches!(self.selection, SessionSelection::Idle) {
             return;
         }
         let cwd = folder.to_string_lossy().into_owned();
-        self.pin_project(&cwd, cx);
-        self.new_project_chat(&cwd, window, cx);
-        self.focus_sidebar_project(&cwd, cx);
+        self.pin_project(&cwd);
+        self.new_project_chat(&cwd);
+        self.focus_sidebar_project(&cwd);
     }
 
     pub(super) fn remember_project(&mut self) {
@@ -176,8 +145,8 @@ impl PrimeDesktopView {
         }
     }
 
-    pub(super) fn stash_draft(&mut self, cx: &mut Context<Self>) {
-        let text = self.composer_input.read(cx).text();
+    pub(super) fn stash_draft(&mut self) {
+        let text = self.composer_input.text.as_str();
         if text.is_empty() && self.staged_images.is_empty() {
             return;
         }
@@ -186,12 +155,12 @@ impl PrimeDesktopView {
             .entry(self.draft_key())
             .or_default()
             .push_front(draft);
-        self.composer_input.update(cx, TextInput::clear);
+        self.composer_input.replace_text("");
     }
 
-    pub(super) fn restore_draft(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn restore_draft(&mut self) {
         let key = self.draft_key();
-        if self.composer_input.read(cx).text().is_empty()
+        if self.composer_input.text.is_empty()
             && self.staged_images.is_empty()
             && let Some(drafts) = self.drafts.get_mut(&key)
             && let Some((text, images)) = drafts.pop_front()
@@ -199,8 +168,7 @@ impl PrimeDesktopView {
             if drafts.is_empty() {
                 self.drafts.remove(&key);
             }
-            self.composer_input
-                .update(cx, |input, cx| input.set_text(text, cx));
+            self.composer_input.replace_text(text);
             self.staged_images = images;
         }
     }
@@ -223,11 +191,8 @@ mod tests {
             daemon_socket: Some(root.path().join("no-listener")),
             ..LaunchOptions::default()
         };
-        let mut app = gpui::TestAppContext::single();
-        let (view, cx) = app.add_window_view(|window, cx| {
-            PrimeDesktopView::new(options, agent.clone(), window, cx)
-        });
-        view.update_in(cx, |view, window, cx| {
+        let mut view = PrimeDesktopView::new(options, agent.clone());
+        {
             view.saved_sessions.push(
                 crate::state::SavedSessionRow::from_wire(&serde_json::json!({
                     "id": "old", "path": "/history/old.jsonl", "cwd": history,
@@ -236,25 +201,23 @@ mod tests {
             );
             view.remember_project();
             view.session.active_session_id = "resident".into();
-            view.populate_draft("keep my changes", window, cx);
-            view.sidebar_search_input
-                .update(cx, |input, cx| input.set_text("older", cx));
+            view.populate_draft("keep my changes");
+            view.sidebar_search_input.replace_text("older");
             let found = view.project_groups("older");
             assert!(!found[0].is_project(view.current_project()));
-            view.pin_project(history, cx);
-            view.pin_project(history, cx);
+            view.pin_project(history);
+            view.pin_project(history);
             let pinned = view.project_groups("older");
             assert!(pinned[0].is_project(view.current_project()) && pinned[0].added);
             assert_eq!(pinned[0].chats, found[0].chats);
             assert_eq!(view.session.active_session_id, "resident");
             assert_eq!(view.working_cwd, here);
-            assert_eq!(view.composer_input.read(cx).text(), "keep my changes");
-            assert_eq!(view.sidebar_search_input.read(cx).text(), "older");
-        });
+            assert_eq!(view.composer_input.text.as_str(), "keep my changes");
+            assert_eq!(view.sidebar_search_input.text.as_str(), "older");
+        }
         let prefs = DesktopPreferences::load(&agent);
         assert_eq!(prefs.project_folders, [history]);
         assert_eq!(prefs.last_project.as_deref(), Some(here));
-        app.quit();
     }
 
     #[test]
@@ -267,14 +230,11 @@ mod tests {
             daemon_socket: Some(root.path().join("no-listener")),
             ..LaunchOptions::default()
         };
-        let mut app = gpui::TestAppContext::single();
-        let (view, cx) = app.add_window_view(|window, cx| {
-            PrimeDesktopView::new(options, root.path().join("agent"), window, cx)
-        });
-        view.update_in(cx, |view, window, cx| {
-            view.populate_draft("resume from checkout", window, cx);
-            view.new_project_chat(elsewhere, window, cx);
-            view.pin_project("/work/app", cx);
+        let mut view = PrimeDesktopView::new(options, root.path().join("agent"));
+        {
+            view.populate_draft("resume from checkout");
+            view.new_project_chat(elsewhere);
+            view.pin_project("/work/app");
             let groups = view.project_groups("");
             let current = groups
                 .iter()
@@ -283,17 +243,16 @@ mod tests {
             assert_eq!(current.draft_cwds, [elsewhere]);
             let project = groups.iter().find(|g| g.added).unwrap();
             assert_eq!(project.draft_cwds, [checkout]);
-            view.unpin_project("/work/app", cx);
+            view.unpin_project("/work/app");
             let history = view.project_groups("checkout");
             assert_eq!(history[0].folder(), Some(checkout));
             assert!(!history[0].is_project(elsewhere));
             assert_eq!(history[0].draft_cwds, [checkout]);
-            view.new_project_chat(&history[0].draft_cwds[0], window, cx);
+            view.new_project_chat(&history[0].draft_cwds[0]);
             assert_eq!(view.working_cwd, checkout);
-            assert_eq!(view.composer_input.read(cx).text(), "resume from checkout");
+            assert_eq!(view.composer_input.text.as_str(), "resume from checkout");
             assert!(view.session.active_session_id.is_empty());
-        });
-        app.quit();
+        }
     }
 
     #[test]
@@ -306,26 +265,22 @@ mod tests {
             daemon_socket: Some(root.path().join("no-listener")),
             ..LaunchOptions::default()
         };
-        let mut app = gpui::TestAppContext::single();
-        let (view, cx) = app.add_window_view(|window, cx| {
-            PrimeDesktopView::new(options, root.path().join("agent"), window, cx)
-        });
-        view.update_in(cx, |view, window, cx| {
-            view.pin_project(other, cx);
-            view.focus_sidebar_project(other, cx);
+        let mut view = PrimeDesktopView::new(options, root.path().join("agent"));
+        {
+            view.pin_project(other);
+            view.focus_sidebar_project(other);
             assert_eq!(view.working_cwd, here);
             view.prefs.sidebar_open = false;
-            view.start_fresh_session(window, cx);
+            view.start_fresh_session();
             assert_eq!(view.working_cwd, here);
             view.prefs.sidebar_open = true;
-            view.focus_sidebar_project(other, cx);
-            view.start_fresh_session(window, cx);
+            view.focus_sidebar_project(other);
+            view.start_fresh_session();
             assert_eq!(view.working_cwd, other);
-            view.unpin_project(other, cx);
+            view.unpin_project(other);
             assert!(view.sidebar_project.is_none());
             assert_eq!(view.working_cwd, other);
-        });
-        app.quit();
+        }
     }
 
     #[test]
@@ -338,23 +293,16 @@ mod tests {
             daemon_socket: Some(root.path().join("no-listener")),
             ..LaunchOptions::default()
         };
-        let mut app = gpui::TestAppContext::single();
-        let (view, cx) = app.add_window_view(|window, cx| {
-            PrimeDesktopView::new(options.clone(), agent.clone(), window, cx)
-        });
-        view.update_in(cx, |view, window, cx| {
-            view.add_project(&folder, window, cx);
-            view.add_project(&folder, window, cx);
+        let mut view = PrimeDesktopView::new(options.clone(), agent.clone());
+        {
+            view.add_project(&folder);
+            view.add_project(&folder);
             assert!(view.session.active_session_id.is_empty());
             assert_eq!(view.sidebar_project.as_deref(), folder.to_str());
-        });
+        }
         let prefs = DesktopPreferences::load(&agent);
         assert_eq!(prefs.project_folders, [folder.to_str().unwrap()]);
-        let (reopened, cx) =
-            app.add_window_view(|window, cx| PrimeDesktopView::new(options, agent, window, cx));
-        reopened.read_with(cx, |view, _| {
-            assert_eq!(Path::new(view.current_project()), folder);
-        });
-        app.quit();
+        let reopened = PrimeDesktopView::new(options, agent);
+        assert_eq!(Path::new(reopened.current_project()), folder);
     }
 }

@@ -17,10 +17,9 @@ use pa_desktop::state::harness_store::{
 use pa_desktop::state::models::parse_model_catalog;
 use pa_desktop::state::transcript::{AssistantBlock, AttachedSessionState, TranscriptEntry};
 use pa_desktop::theme::DaemonTarget;
-use pa_desktop::ui::text_input::bind_text_input_keys;
-use pa_desktop::ui::workspace::{
-    LaunchOptions, PrimeDesktopView, register_workspace_bindings_and_menus,
-};
+use pa_desktop::ui::workspace::{LaunchOptions, PrimeDesktopView};
+
+use rune::{Env, Key, KeyEvent, Runtime};
 
 struct IsolatedDaemon {
     child: Child,
@@ -110,55 +109,69 @@ impl IsolatedDaemon {
         daemon
     }
 
-    fn open_workspace<'a>(
-        &self,
-        app: &'a mut gpui::TestAppContext,
-        preferences_dir: &Path,
-    ) -> (
-        gpui::Entity<PrimeDesktopView>,
-        &'a mut gpui::VisualTestContext,
-    ) {
-        app.dispatcher.allow_parking(); // Socket traffic wakes the GPUI test dispatcher.
-        app.update(|cx| {
-            bind_text_input_keys(cx);
-            register_workspace_bindings_and_menus(cx);
-        });
-        app.add_window_view(|window, cx| {
-            PrimeDesktopView::new(
-                LaunchOptions {
-                    daemon_socket: Some(self.socket.clone()),
-                    initial_cwd: Some(self.work_dir.clone()),
-                    ..LaunchOptions::default()
-                },
-                preferences_dir.to_path_buf(),
-                window,
-                cx,
-            )
-        })
+    fn open_workspace(&self, preferences_dir: &Path) -> Runtime<PrimeDesktopView> {
+        let state = PrimeDesktopView::new(
+            LaunchOptions {
+                daemon_socket: Some(self.socket.clone()),
+                initial_cwd: Some(self.work_dir.clone()),
+                ..LaunchOptions::default()
+            },
+            preferences_dir.to_path_buf(),
+        );
+        let mut desktop = Runtime::new(
+            state,
+            PrimeDesktopView::view,
+            (1360.0, 860.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        desktop.poll = Some(PrimeDesktopView::poll);
+        desktop.frame(0.0);
+        desktop
     }
 }
 
 fn wait_for_workspace(
-    cx: &mut gpui::VisualTestContext,
-    view: &gpui::Entity<PrimeDesktopView>,
-    rt: &tokio::runtime::Runtime,
+    desktop: &mut Runtime<PrimeDesktopView>,
     predicate: impl Fn(&PrimeDesktopView) -> bool,
 ) {
-    let _clock = rt.enter();
-    cx.executor()
-        .block_test(tokio::time::timeout(
-            Duration::from_secs(15),
-            cx.condition(view, |view, _| predicate(view)),
-        ))
-        .expect("timed out waiting for workspace update");
+    let start = Instant::now();
+    loop {
+        desktop.frame(1.0 / 60.0);
+        if predicate(&desktop.state) {
+            return;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "timed out waiting for workspace update"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
-fn click(cx: &mut gpui::VisualTestContext, selector: &'static str) {
-    cx.update(|window, cx| window.draw(cx).clear());
-    let bounds = cx
-        .debug_bounds(selector)
-        .unwrap_or_else(|| panic!("missing {selector}"));
-    cx.simulate_click(bounds.center(), gpui::Modifiers::default());
+fn click(desktop: &mut Runtime<PrimeDesktopView>, key: &str) {
+    desktop.frame(1.0 / 60.0);
+    let element = desktop
+        .elements()
+        .into_iter()
+        .find(|element| element.key.as_deref() == Some(key) && !element.exiting)
+        .unwrap_or_else(|| panic!("missing {key}"));
+    let [left, top, width, height] = element.visible;
+    assert!(width > 0.0 && height > 0.0, "{key} is clipped");
+    let (x, y) = (left + width / 2.0, top + height / 2.0);
+    desktop.pointer_down(x, y);
+    desktop.pointer_up(x, y);
+    desktop.frame(1.0 / 60.0);
+}
+
+fn press(desktop: &mut Runtime<PrimeDesktopView>, key: Key) {
+    desktop.key(KeyEvent {
+        key,
+        mods: rune::Mods::default(),
+    });
+    desktop.frame(1.0 / 60.0);
 }
 
 impl Drop for IsolatedDaemon {
@@ -201,8 +214,8 @@ fn desktop_bridge_supervises_session_bash_catalog_and_harness_store() {
         &HarnessEntryDraft {
             scope: HarnessScope::Global,
             kind: RefinementKind::Memory,
-            id_override: Some("gpui_smoke_mem"),
-            title: "GPUI Desktop Smoke Memory",
+            id_override: Some("desktop_smoke_mem"),
+            title: "Desktop Smoke Memory",
             content: "Keep frame render paths free of synchronous IPC.",
             category_path: None,
         },
@@ -218,7 +231,7 @@ fn desktop_bridge_supervises_session_bash_catalog_and_harness_store() {
             None,
             HarnessScope::Global,
             RefinementKind::Memory,
-            "gpui_smoke_mem"
+            "desktop_smoke_mem"
         )
         .unwrap()
     );
@@ -257,7 +270,7 @@ fn desktop_bridge_supervises_session_bash_catalog_and_harness_store() {
                     connected = true;
                     bridge.send(BridgeRequest::CreateSession {
                         cwd: work_dir.to_string_lossy().to_string(),
-                        name: Some("GPUI Integration Session".to_string()),
+                        name: Some("Desktop Integration Session".to_string()),
                         initial_prompt: None,
                         images: Vec::new(),
                     });
@@ -272,7 +285,7 @@ fn desktop_bridge_supervises_session_bash_catalog_and_harness_store() {
                     bridge.send(BridgeRequest::RefreshInspector { active_session_id: active_session_id.clone() });
                     bridge.send(BridgeRequest::ExecuteBash {
                         active_session_id,
-                        command: "printf 'gpui-bridge-ok'".to_string(),
+                        command: "printf 'desktop-bridge-ok'".to_string(),
                     });
                 }
                 BridgeEvent::ModelCatalogLoaded { data: val, .. } => {
@@ -292,7 +305,7 @@ fn desktop_bridge_supervises_session_bash_catalog_and_harness_store() {
                                 running: false,
                                 output,
                                 ..
-                            } if output.contains("gpui-bridge-ok")
+                            } if output.contains("desktop-bridge-ok")
                         )
                     }) {
                         saw_bash_done = true;
@@ -351,11 +364,11 @@ fn desktop_bridge_supervises_session_bash_catalog_and_harness_store() {
                     assert_ne!(active_session_id, first_sid, "reopened before the old worker retired");
                     let mut restored = AttachedSessionState::default();
                     restored.load_snapshot(&active_session_id, &snapshot);
-                    assert_eq!(restored.display_title(), "GPUI Integration Session");
+                    assert_eq!(restored.display_title(), "Desktop Integration Session");
                     assert!(
                         restored.entries.iter().any(|e| matches!(
                             e,
-                            TranscriptEntry::UserBash { output, .. } if output.contains("gpui-bridge-ok")
+                            TranscriptEntry::UserBash { output, .. } if output.contains("desktop-bridge-ok")
                         )),
                         "reopened session snapshot must preserve bash history"
                     );
@@ -406,29 +419,29 @@ fn return_in_the_composer_sends_the_prompt_and_displays_the_reply() {
     let sid = created["activeSessionId"]
         .as_str()
         .expect("active session id");
-    let mut app = gpui::TestAppContext::single();
-    let (view, cx) = daemon.open_workspace(&mut app, &daemon.agent_dir);
-    wait_for_workspace(cx, &view, &rt, |workspace| {
+    let mut desktop = daemon.open_workspace(&daemon.agent_dir);
+    wait_for_workspace(&mut desktop, |workspace| {
         workspace
             .active_sessions
             .iter()
             .any(|row| row.active_session_id == sid)
     });
-    click(cx, "live-session");
-    wait_for_workspace(cx, &view, &rt, |workspace| {
+    click(&mut desktop, &format!("live-session-{sid}"));
+    wait_for_workspace(&mut desktop, |workspace| {
         workspace.session.active_session_id == sid
     });
-    view.read_with(cx, |workspace, _| {
+    {
+        let workspace = &desktop.state;
         assert_eq!(workspace.session.model_provider.as_deref(), Some("faux"));
-    });
-    click(cx, "composer-input");
-    cx.update(|window, cx| window.draw(cx).clear());
-    cx.simulate_keystrokes("c h e c k space n o t e s");
-    view.read_with(cx, |workspace, cx| {
-        assert_eq!(workspace.composer_input.read(cx).text(), PROMPT);
-    });
-    cx.simulate_keystrokes("enter");
-    wait_for_workspace(cx, &view, &rt, |workspace| {
+    }
+    click(&mut desktop, "composer-input");
+    press(&mut desktop, Key::Text(PROMPT.into()));
+    {
+        let workspace = &desktop.state;
+        assert_eq!(workspace.composer_input.text, PROMPT);
+    }
+    press(&mut desktop, Key::Enter);
+    wait_for_workspace(&mut desktop, |workspace| {
         matches!(
             workspace.session.entries.last(),
             Some(TranscriptEntry::Assistant {
@@ -437,16 +450,18 @@ fn return_in_the_composer_sends_the_prompt_and_displays_the_reply() {
             })
         )
     });
-    view.read_with(cx, |workspace, cx| {
-        assert!(workspace.composer_input.read(cx).text().is_empty());
+    {
+        let workspace = &desktop.state;
+        assert!(workspace.composer_input.text.is_empty());
         let messages = &workspace.session.entries;
-        assert!(matches!(messages.as_slice(), [
+        assert!(
+            matches!(messages.as_slice(), [
             TranscriptEntry::User { text, .. },
             TranscriptEntry::Assistant { blocks, streaming: false, error: None, .. }
         ] if text == PROMPT && matches!(blocks.as_slice(), [AssistantBlock::Text(reply)] if reply == REPLY)),
-            "expected the typed prompt and settled reply, got {messages:?}");
-    });
-    app.quit();
+            "expected the typed prompt and settled reply, got {messages:?}"
+        );
+    }
 }
 
 #[test]
@@ -461,31 +476,29 @@ fn project_new_chat_preserves_drafts_without_creating_sessions() {
     )
     .unwrap();
 
-    let mut app = gpui::TestAppContext::single();
-    let (view, cx) = daemon.open_workspace(&mut app, &daemon.agent_dir);
+    let mut desktop = daemon.open_workspace(&daemon.agent_dir);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(1)
         .enable_all()
         .build()
         .unwrap();
-    wait_for_workspace(cx, &view, &rt, |v| v.daemon_connected);
-    // GPUI requires 'static debug selectors, but the fixture paths are unique per run.
-    let first_button: &'static str = format!("project-new-chat-{}", first.display()).leak();
-    let second_button: &'static str = format!("project-new-chat-{}", second.display()).leak();
+    wait_for_workspace(&mut desktop, |v| v.daemon_connected);
+    let first_button = format!("project-new-chat-{}", first.display());
+    let second_button = format!("project-new-chat-{}", second.display());
     for (button, cwd, expected, keys) in [
-        (first_button, first, "", "p l a n"),
-        (second_button, &second, "", "s h i p"),
-        (first_button, first, "plan", ""),
-        (second_button, &second, "ship", ""),
+        (&first_button, first, "", "plan"),
+        (&second_button, &second, "", "ship"),
+        (&first_button, first, "plan", ""),
+        (&second_button, &second, "ship", ""),
     ] {
-        click(cx, button);
-        view.read_with(cx, |view, cx| {
+        click(&mut desktop, button);
+        {
+            let view = &desktop.state;
             assert_eq!(Path::new(&view.working_cwd), cwd);
-            assert_eq!(view.composer_input.read(cx).text(), expected);
-        });
+            assert_eq!(view.composer_input.text, expected);
+        }
         if !keys.is_empty() {
-            cx.update(|window, cx| window.draw(cx).clear());
-            cx.simulate_keystrokes(keys);
+            press(&mut desktop, Key::Text(keys.into()));
         }
     }
 
@@ -498,7 +511,6 @@ fn project_new_chat_preserves_drafts_without_creating_sessions() {
         ))
         .expect("list daemon sessions");
     assert_eq!(roster["sessions"], serde_json::json!([]));
-    app.quit();
 }
 
 #[test]
@@ -542,48 +554,45 @@ fn an_older_cli_chat_opens_from_another_project_without_copying_it() {
         file.set_path(sessions.join(session_file_name(file.session_id())));
         file.rewrite().unwrap();
     }
-    let mut app = gpui::TestAppContext::single();
-    let (view, cx) = daemon.open_workspace(&mut app, &desktop_dir);
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_time()
-        .build()
-        .unwrap();
-    wait_for_workspace(cx, &view, &rt, |view| !view.saved_sessions.is_empty());
-    view.update(cx, |view, cx| {
+    let mut desktop = daemon.open_workspace(&desktop_dir);
+    wait_for_workspace(&mut desktop, |view| !view.saved_sessions.is_empty());
+    {
+        let view = &desktop.state;
         assert!(
             !view
                 .saved_sessions
                 .iter()
                 .any(|s| s.id == older.session_id())
         );
-        view.sidebar_search_input
-            .update(cx, |input, cx| input.set_text("other-project", cx));
-    });
-    click(cx, "load-older-chats");
-    wait_for_workspace(cx, &view, &rt, |view| {
+    }
+    click(&mut desktop, "sidebar-search");
+    press(&mut desktop, Key::Text("other-project".into()));
+    click(&mut desktop, "load-older-chats");
+    wait_for_workspace(&mut desktop, |view| {
         view.saved_sessions
             .iter()
             .any(|s| s.id == older.session_id())
     });
-    click(cx, "saved-chat");
-    wait_for_workspace(cx, &view, &rt, |view| {
+    click(&mut desktop, &format!("saved-chat-{}", path.display()));
+    wait_for_workspace(&mut desktop, |view| {
         view.session.session_id == older.session_id()
     });
-    view.read_with(cx, |view, _| {
+    {
+        let view = &desktop.state;
         assert_eq!(view.session.session_file.as_deref(), path.to_str());
         assert_eq!(view.working_cwd, checkout.to_str().unwrap());
         assert!(view.session.entries.iter().any(|entry| matches!(entry,
             TranscriptEntry::User { text, .. } if text == "A note from the CLI")));
-    });
-    view.read_with(cx, |view, _| {
+    }
+    {
+        let view = &desktop.state;
         assert_eq!(view.agent_dir, daemon.agent_dir);
         assert!(
             view.provider_auth
                 .iter()
                 .any(|item| item.provider_id == "custom-saved" && item.has_stored_api_key)
         );
-    });
+    }
     // Reopening may append worker state, but never changes prior journal bytes.
     assert!(std::fs::read(&path).unwrap().starts_with(&history));
     assert!(!desktop_dir.join("auth.json").exists());
@@ -591,7 +600,6 @@ fn an_older_cli_chat_opens_from_another_project_without_copying_it() {
         std::fs::read(daemon.agent_dir.join("auth.json")).unwrap(),
         credentials
     );
-    app.quit();
 }
 
 #[test]
@@ -610,27 +618,25 @@ fn temporary_chat_can_be_found_and_reopened_after_its_folder_is_removed() {
         .join(session_file_name(file.session_id()));
     file.set_path(log.clone());
     file.rewrite().unwrap();
-    let mut app = gpui::TestAppContext::single();
-    let (view, cx) = daemon.open_workspace(&mut app, &daemon.agent_dir);
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_time()
-        .build()
-        .unwrap();
-    wait_for_workspace(cx, &view, &rt, |w| {
+    let mut desktop = daemon.open_workspace(&daemon.agent_dir);
+    wait_for_workspace(&mut desktop, |w| {
         w.saved_sessions
             .iter()
             .any(|s| s.path == log.to_string_lossy())
     });
-    cx.update(|window, cx| window.draw(cx).clear());
-    assert!(cx.debug_bounds("saved-chat").is_none());
-    click(cx, "sidebar-history");
-    click(cx, "project-toggle-\0temporary");
-    click(cx, "saved-chat");
-    wait_for_workspace(cx, &view, &rt, |w| {
-        w.session.session_id == file.session_id()
-    });
-    view.read_with(cx, |w, _| {
+    let saved_chat = format!("saved-chat-{}", log.display());
+    assert!(
+        !desktop
+            .elements()
+            .iter()
+            .any(|el| el.key.as_deref() == Some(&saved_chat))
+    );
+    click(&mut desktop, "sidebar-history");
+    click(&mut desktop, "project-toggle-\0temporary");
+    click(&mut desktop, &saved_chat);
+    wait_for_workspace(&mut desktop, |w| w.session.session_id == file.session_id());
+    {
+        let w = &desktop.state;
         assert_eq!(w.session.session_file.as_deref(), log.to_str());
         assert_eq!(w.working_cwd, removed.to_string_lossy());
         assert!(
@@ -639,12 +645,11 @@ fn temporary_chat_can_be_found_and_reopened_after_its_folder_is_removed() {
                 .iter()
                 .any(|e| matches!(e, TranscriptEntry::User {text, ..} if text == "A test chat"))
         );
-    });
+    }
     assert!(
         !removed.exists(),
         "viewing history must not recreate the working directory"
     );
-    app.quit();
 }
 
 /// Requires an installed kernel runtime; the workspace kernel-backed daemon tests use the same override.
@@ -655,7 +660,7 @@ fn a_spawned_subagent_updates_its_card_and_opens_its_own_transcript() {
     let daemon = IsolatedDaemon::with_kernel(Some(Path::new(&kernel)));
     let parent_script = daemon.root.path().join("parent.json");
     let child_script = daemon.root.path().join("child.json");
-    // Keep the parent's tool turn open until GPUI observes the running child. A refresh
+    // Keep the parent's tool turn open until the desktop observes the running child. A refresh
     // at turn_end alone cannot pass this test. The child prompt starts after parent settle.
     let release = daemon.root.path().join("observed");
     let code = format!(
@@ -685,49 +690,43 @@ fn a_spawned_subagent_updates_its_card_and_opens_its_own_transcript() {
     let created = rt.block_on(link.request_success(serde_json::json!({"type":"create", "name":"parent", "telemetryDisabled":true,
         "lifecycle":"resident", "config":{"cwd":daemon.work_dir, "script": parent_script, "childScript":child_script}}), Duration::from_secs(30))).unwrap();
     let sid = created["activeSessionId"].as_str().unwrap();
-    let mut app = gpui::TestAppContext::single();
-    let (view, cx) = daemon.open_workspace(&mut app, &daemon.agent_dir);
-    wait_for_workspace(cx, &view, &rt, |w| {
+    let mut desktop = daemon.open_workspace(&daemon.agent_dir);
+    wait_for_workspace(&mut desktop, |w| {
         w.active_sessions
             .iter()
             .any(|row| row.active_session_id == sid)
     });
-    click(cx, "live-session");
-    wait_for_workspace(cx, &view, &rt, |w| {
+    click(&mut desktop, &format!("live-session-{sid}"));
+    wait_for_workspace(&mut desktop, |w| {
         w.session.active_session_id == sid && w.rlm_children.loaded
     });
     rt.block_on(link.request_success(serde_json::json!({"type":"prompt", "activeSessionId":sid,"message":"Delegate the review."}), Duration::from_secs(30))).unwrap();
-    wait_for_workspace(cx, &view, &rt, |w| {
+    wait_for_workspace(&mut desktop, |w| {
         w.rlm_children
             .rows
             .iter()
             .any(|c| c.name == "reviewer" && c.status == "running")
     });
-    click(cx, "session-subagents");
-    // Socket traffic advances wall time, while GPUI's test animation clock stays still.
-    // Draw the opening inspector, then advance past its slide before clicking a child.
-    cx.update(|window, cx| window.draw(cx).clear());
-    cx.background_executor
-        .advance_clock(Duration::from_millis(250));
+    click(&mut desktop, "session-subagents");
     std::fs::write(release, b"observed").unwrap();
-    wait_for_workspace(cx, &view, &rt, |w| {
+    wait_for_workspace(&mut desktop, |w| {
         w.rlm_children.rows.iter().any(|c| {
             c.name == "reviewer"
                 && c.status == "done"
                 && c.answer_preview.as_deref() == Some("Review complete.")
         })
     });
-    click(cx, "subagent-inspect");
-    wait_for_workspace(cx, &view, &rt, |w| {
+    click(&mut desktop, "subagent-inspect");
+    wait_for_workspace(&mut desktop, |w| {
         w.session.session_name.as_deref() == Some("reviewer")
     });
-    view.read_with(cx, |w, _| {
+    {
+        let w = &desktop.state;
         assert_ne!(w.session.active_session_id, sid);
         assert!(w.session.entries.iter().any(|e| matches!(e, TranscriptEntry::Assistant { blocks, .. } if blocks.contains(&AssistantBlock::Text("Review complete.".into())))));
-    });
-    click(cx, "subagent-parent");
-    wait_for_workspace(cx, &view, &rt, |w| {
+    }
+    click(&mut desktop, "subagent-parent");
+    wait_for_workspace(&mut desktop, |w| {
         w.session.active_session_id == sid && w.rlm_children.rows.len() == 1
     });
-    app.quit();
 }

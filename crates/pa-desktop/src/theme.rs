@@ -4,8 +4,10 @@
 
 use std::path::{Path, PathBuf};
 
-use gpui::{Hsla, SharedString, rgb, rgba};
+use rune::Color;
+use rune::color::srgb_decode;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 /// Desktop color scheme.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -201,161 +203,185 @@ impl DesktopPreferences {
 pub struct Palette {
     pub mode: ThemeMode,
     /// Primary stage background.
-    pub bg_canvas: Hsla,
+    pub bg_canvas: Color,
     /// Left sidebar rail background.
-    pub bg_sidebar: Hsla,
+    pub bg_sidebar: Color,
     /// Right inspector drawer background.
-    pub bg_inspector: Hsla,
+    pub bg_inspector: Color,
     /// Elevated card / composer surface.
-    pub bg_elevated: Hsla,
+    pub bg_elevated: Color,
     /// Subtle recessed code / terminal block background.
-    pub bg_code: Hsla,
+    pub bg_code: Color,
     /// User message warm bubble background.
-    pub bg_user_bubble: Hsla,
+    pub bg_user_bubble: Color,
     /// Hover tint on interactive rows/buttons.
-    pub bg_hover: Hsla,
+    pub bg_hover: Color,
     /// Selected row tint in sidebar/lists.
-    pub bg_selected: Hsla,
+    pub bg_selected: Color,
     /// Modal backdrop scrim.
-    pub bg_scrim: Hsla,
+    pub bg_scrim: Color,
 
     /// Subtle hairline divider.
-    pub border_subtle: Hsla,
+    pub border_subtle: Color,
     /// Emphasized border (composer focus, active cards).
-    pub border_strong: Hsla,
+    pub border_strong: Color,
 
     /// Primary body & heading ink.
-    pub text_primary: Hsla,
+    pub text_primary: Color,
     /// Secondary label & metadata ink.
-    pub text_secondary: Hsla,
+    pub text_secondary: Color,
     /// Muted placeholder / timestamp ink.
-    pub text_muted: Hsla,
+    pub text_muted: Color,
     /// Crisp ink over `accent` buttons.
-    pub text_on_accent: Hsla,
+    pub text_on_accent: Color,
 
     /// Terracotta accent for primary actions.
-    pub accent: Hsla,
+    pub accent: Color,
     /// Hovered primary accent.
-    pub accent_hover: Hsla,
+    pub accent_hover: Color,
     /// Soft translucent terracotta wash for badges/pills.
-    pub accent_soft: Hsla,
+    pub accent_soft: Color,
     /// Highlight behind selected text in the focused control.
-    pub selection_bg: Hsla,
+    pub selection_bg: Color,
     /// Preserve the selection context when focus moves elsewhere.
-    pub selection_bg_inactive: Hsla,
+    pub selection_bg_inactive: Color,
 
     /// Sage green (healthy daemon, completed/live agent, added diff lines).
-    pub success: Hsla,
-    pub success_soft: Hsla,
+    pub success: Color,
+    pub success_soft: Color,
     /// Ochre amber (thinking/working pulse, compaction, warnings).
-    pub warning: Hsla,
-    pub warning_soft: Hsla,
+    pub warning: Color,
+    pub warning_soft: Color,
     /// Soft rose (errors, abort, removed diff lines).
-    pub danger: Hsla,
-    pub danger_soft: Hsla,
+    pub danger: Color,
+    pub danger_soft: Color,
     /// Slate blue (RLM subagent links, depth tags, python kernel accent).
-    pub info: Hsla,
-    pub info_soft: Hsla,
+    pub info: Color,
+    pub info_soft: Color,
 }
 
 impl Palette {
     #[must_use]
     pub fn for_mode(mode: ThemeMode) -> Self {
+        static DARK: LazyLock<Palette> = LazyLock::new(|| Palette::build(ThemeMode::Dark));
+        static LIGHT: LazyLock<Palette> = LazyLock::new(|| Palette::build(ThemeMode::Light));
+        match mode {
+            ThemeMode::Dark => *DARK,
+            ThemeMode::Light => *LIGHT,
+        }
+    }
+
+    fn build(mode: ThemeMode) -> Self {
         match mode {
             ThemeMode::Dark => Self {
                 mode,
-                bg_canvas: rgb(0x001C_1B18).into(),
-                bg_sidebar: rgb(0x0015_1412).into(),
-                bg_inspector: rgb(0x0017_1613).into(),
-                bg_elevated: rgb(0x0025_2420).into(),
-                bg_code: rgb(0x0013_1210).into(),
-                bg_user_bubble: rgb(0x002B_2924).into(),
-                bg_hover: rgba(0xFFF7_E810).into(),
-                bg_selected: rgba(0xD977_5722).into(),
-                bg_scrim: rgba(0x0B0A_09AD).into(),
+                bg_canvas: rgb(0x001C_1B18),
+                bg_sidebar: rgb(0x0015_1412),
+                bg_inspector: rgb(0x0017_1613),
+                bg_elevated: rgb(0x0025_2420),
+                bg_code: rgb(0x0013_1210),
+                bg_user_bubble: rgb(0x002B_2924),
+                bg_hover: rgba(0xFFF7_E810),
+                bg_selected: rgba(0xD977_5722),
+                bg_scrim: rgba(0x0B0A_09AD),
 
-                border_subtle: rgba(0xFFF6_E514).into(),
-                border_strong: rgba(0xFFF6_E529).into(),
+                border_subtle: rgba(0xFFF6_E514),
+                border_strong: rgba(0xFFF6_E529),
 
-                text_primary: rgb(0x00F2_EFE9).into(),
-                text_secondary: rgb(0x00AD_A79C).into(),
-                text_muted: rgb(0x009A_958A).into(),
-                text_on_accent: rgb(0x0029_1F18).into(),
+                text_primary: rgb(0x00F2_EFE9),
+                text_secondary: rgb(0x00AD_A79C),
+                text_muted: rgb(0x009A_958A),
+                text_on_accent: rgb(0x0029_1F18),
 
-                accent: rgb(0x00E0_A289).into(),
-                accent_hover: rgb(0x00F0_B298).into(),
-                accent_soft: rgba(0xD977_5726).into(),
-                selection_bg: rgba(0xE0A2_8948).into(),
-                selection_bg_inactive: rgba(0xE0A2_8924).into(),
+                accent: rgb(0x00E0_A289),
+                accent_hover: rgb(0x00F0_B298),
+                accent_soft: rgba(0xD977_5726),
+                selection_bg: rgba(0xE0A2_8948),
+                selection_bg_inactive: rgba(0xE0A2_8924),
 
-                success: rgb(0x006B_A87C).into(),
-                success_soft: rgba(0x6BA8_7C24).into(),
-                warning: rgb(0x00D9_A45B).into(),
-                warning_soft: rgba(0xD9A4_5B24).into(),
-                danger: rgb(0x00DC_6B6B).into(),
-                danger_soft: rgba(0xDC6B_6B24).into(),
-                info: rgb(0x0073_9EC2).into(),
-                info_soft: rgba(0x739E_C224).into(),
+                success: rgb(0x006B_A87C),
+                success_soft: rgba(0x6BA8_7C24),
+                warning: rgb(0x00D9_A45B),
+                warning_soft: rgba(0xD9A4_5B24),
+                danger: rgb(0x00DC_6B6B),
+                danger_soft: rgba(0xDC6B_6B24),
+                info: rgb(0x0073_9EC2),
+                info_soft: rgba(0x739E_C224),
             },
             ThemeMode::Light => Self {
                 mode,
-                bg_canvas: rgb(0x00FA_F9F6).into(),
-                bg_sidebar: rgb(0x00F1_F0EC).into(),
-                bg_inspector: rgb(0x00F6_F5F1).into(),
-                bg_elevated: rgb(0x00FF_FFFF).into(),
-                bg_code: rgb(0x00F2_F1EE).into(),
-                bg_user_bubble: rgb(0x00EF_ECE5).into(),
-                bg_hover: rgba(0x1F1D_190D).into(),
-                bg_selected: rgba(0xC964_421C).into(),
-                bg_scrim: rgba(0x1C1A_1666).into(),
+                bg_canvas: rgb(0x00FA_F9F6),
+                bg_sidebar: rgb(0x00F1_F0EC),
+                bg_inspector: rgb(0x00F6_F5F1),
+                bg_elevated: rgb(0x00FF_FFFF),
+                bg_code: rgb(0x00F2_F1EE),
+                bg_user_bubble: rgb(0x00EF_ECE5),
+                bg_hover: rgba(0x1F1D_190D),
+                bg_selected: rgba(0xC964_421C),
+                bg_scrim: rgba(0x1C1A_1666),
 
-                border_subtle: rgba(0x1F1D_1916).into(),
-                border_strong: rgba(0x1F1D_192E).into(),
+                border_subtle: rgba(0x1F1D_1916),
+                border_strong: rgba(0x1F1D_192E),
 
-                text_primary: rgb(0x002B_2925).into(),
-                text_secondary: rgb(0x005E_5A52).into(),
-                text_muted: rgb(0x006D_685E).into(),
-                text_on_accent: rgb(0x00FF_FDF9).into(),
+                text_primary: rgb(0x002B_2925),
+                text_secondary: rgb(0x005E_5A52),
+                text_muted: rgb(0x006D_685E),
+                text_on_accent: rgb(0x00FF_FDF9),
 
-                accent: rgb(0x009F_5037).into(),
-                accent_hover: rgb(0x0084_3F2A).into(),
-                accent_soft: rgba(0xC964_421E).into(),
-                selection_bg: rgba(0xC964_4236).into(),
-                selection_bg_inactive: rgba(0xC964_421C).into(),
+                accent: rgb(0x009F_5037),
+                accent_hover: rgb(0x0084_3F2A),
+                accent_soft: rgba(0xC964_421E),
+                selection_bg: rgba(0xC964_4236),
+                selection_bg_inactive: rgba(0xC964_421C),
 
-                success: rgb(0x002F_7D47).into(),
-                success_soft: rgba(0x2F7D_471C).into(),
-                warning: rgb(0x00AD_721E).into(),
-                warning_soft: rgba(0xAD72_1E1C).into(),
-                danger: rgb(0x00BF_3F3F).into(),
-                danger_soft: rgba(0xBF3F_3F1C).into(),
-                info: rgb(0x0036_6994).into(),
-                info_soft: rgba(0x3669_941C).into(),
+                success: rgb(0x002F_7D47),
+                success_soft: rgba(0x2F7D_471C),
+                warning: rgb(0x00AD_721E),
+                warning_soft: rgba(0xAD72_1E1C),
+                danger: rgb(0x00BF_3F3F),
+                danger_soft: rgba(0xBF3F_3F1C),
+                info: rgb(0x0036_6994),
+                info_soft: rgba(0x3669_941C),
             },
         }
     }
 }
 
+// Design tokens are authored in sRGB. Rune stores unpremultiplied, linear-light RGB.
+fn rgb(value: u32) -> Color {
+    rgba((value << 8) | 0xff)
+}
+
+fn rgba(value: u32) -> Color {
+    let [r, g, b, a] = value.to_be_bytes().map(|byte| f32::from(byte) / 255.0);
+    Color {
+        r: srgb_decode(r),
+        g: srgb_decode(g),
+        b: srgb_decode(b),
+        a,
+    }
+}
+
 /// Display face for conversation headings.
 #[must_use]
-pub fn font_display() -> SharedString {
-    SharedString::new_static("Google Sans Flex")
+pub const fn font_display() -> &'static str {
+    "Google Sans Flex"
 }
 
 /// Historical name for the conversation heading face.
 #[must_use]
-pub fn font_serif() -> SharedString {
+pub const fn font_serif() -> &'static str {
     font_display()
 }
 
 /// UI and conversation body font.
 #[must_use]
-pub fn font_sans() -> SharedString {
-    SharedString::new_static("Google Sans")
+pub const fn font_sans() -> &'static str {
+    "Google Sans"
 }
 
 /// Crisp monospace font family for Python REPL cells, bash output, diffs, and IDs.
 #[must_use]
-pub fn font_mono() -> SharedString {
-    SharedString::new_static("Google Sans Code")
+pub const fn font_mono() -> &'static str {
+    "Google Sans Code"
 }

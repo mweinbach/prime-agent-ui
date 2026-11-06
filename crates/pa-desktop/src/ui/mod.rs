@@ -1,9 +1,10 @@
-//! GPUI view components for the Prime Agent desktop harness.
+//! Rune view components for the Prime Agent desktop harness.
 
 pub mod composer;
 pub mod inspector;
 pub mod markdown;
 pub mod modals;
+pub(super) mod panel_controls;
 pub(crate) mod selectable_text;
 pub mod sidebar;
 pub mod stage;

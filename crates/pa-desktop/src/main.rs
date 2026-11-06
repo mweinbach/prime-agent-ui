@@ -59,7 +59,7 @@ fn main() {
             }
             "--help" | "-h" => {
                 println!(
-                    "Prime Agent Desktop (GPUI)\n\n\
+                    "Prime Agent Desktop (Rune)\n\n\
                      Usage: prime-agent-ui [OPTIONS]\n\n\
                      Options:\n  \
                        --cwd <DIR>            Start in the given project directory\n  \
@@ -68,6 +68,10 @@ fn main() {
                        --light / --dark       Override initial theme\n  \
                        --tab <NAME>           Open inspector tab (agents|harness|runtime|system)\n  \
                        --modal <NAME>         Open modal (models|switcher|settings)\n  \
+                       --snap <FILE>          Render a PNG headlessly with Rune\n  \
+                       --tree <FILE>          Write the headless element tree\n  \
+                       --script <FILE>        Replay scripted Rune input\n  \
+                       --size <WxH>           Set the Rune viewport size in points\n  \
                        -V, --version          Print version\n  \
                        -h, --help             Print help"
                 );

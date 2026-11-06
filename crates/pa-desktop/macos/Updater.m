@@ -1,8 +1,8 @@
 #import <AppKit/AppKit.h>
 #import <Sparkle/Sparkle.h>
 
-// GPUI owns the application delegate. Observe native launch and add the action
-// once GPUI has installed the application menu. CLI version probes never launch AppKit.
+// Rune/winit owns the application delegate and installs its native menu as the
+// event loop starts. Activation also fires when the menu follows the launch notification.
 @interface PrimeAgentUpdates : NSObject
 @end
 
@@ -10,21 +10,30 @@
 static SPUStandardUpdaterController *updater;
 
 + (void)load {
-    [[NSNotificationCenter defaultCenter] addObserver:self
-        selector:@selector(applicationLaunched:) name:NSApplicationDidFinishLaunchingNotification object:nil];
+    NSNotificationCenter *notifications = NSNotificationCenter.defaultCenter;
+    [notifications addObserver:self selector:@selector(applicationReady:)
+        name:NSApplicationDidFinishLaunchingNotification object:nil];
+    [notifications addObserver:self selector:@selector(applicationReady:)
+        name:NSApplicationDidBecomeActiveNotification object:nil];
 }
 
-+ (void)applicationLaunched:(NSNotification *)notification {
++ (void)applicationReady:(NSNotification *)notification {
     (void)notification;
     dispatch_async(dispatch_get_main_queue(), ^{
-        if (updater || ![NSBundle.mainBundle objectForInfoDictionaryKey:@"SUFeedURL"]) {
+        NSMenu *menu = NSApp.mainMenu.itemArray.firstObject.submenu;
+        if (!menu || ![NSBundle.mainBundle objectForInfoDictionaryKey:@"SUFeedURL"]) {
             return;
         }
-        updater = [[SPUStandardUpdaterController alloc] initWithStartingUpdater:YES
-            updaterDelegate:nil userDriverDelegate:nil];
-        NSMenu *menu = NSApp.mainMenu.itemArray.firstObject.submenu;
+        if (!updater) {
+            updater = [[SPUStandardUpdaterController alloc] initWithStartingUpdater:YES
+                updaterDelegate:nil userDriverDelegate:nil];
+        }
+        SEL checkForUpdates = @selector(checkForUpdates:);
+        if ([menu indexOfItemWithTarget:updater andAction:checkForUpdates] >= 0) {
+            return;
+        }
         NSMenuItem *check = [[NSMenuItem alloc] initWithTitle:@"Check for Updates…"
-            action:@selector(checkForUpdates:) keyEquivalent:@""];
+            action:checkForUpdates keyEquivalent:@""];
         check.target = updater;
         [menu insertItem:check atIndex:MIN(1, menu.numberOfItems)];
     });

@@ -1,341 +1,550 @@
-//! Overlay modals: Searchable Model Picker (`⌘M`), Quick Switcher / Command Palette (`⌘K`),
-//! and Provider Credentials & Desktop Settings (`⌘,`).
+//! Command and model pickers, provider settings, and destructive-action confirmations.
 
-mod motion;
-
-use gpui::{
-    AnyElement, App, Context, Focusable, FontWeight, SharedString, Window, div, prelude::*, px,
-};
+use rune::{Cx, El, Key, ScrollSpec, Transition, col, el, row};
 
 use crate::assets::Icon;
 use crate::bridge::BridgeRequest;
-use crate::state::harness_store::ProviderAuthItem;
-use crate::state::{ActiveModal, format_tokens_compact, truncate_chars};
-use crate::theme::{Palette, font_mono, font_sans, font_serif};
-use crate::ui::text_input::{Down, Up};
-use crate::ui::tool_cards::pill;
+use crate::state::{
+    ActiveModal, format_tokens_compact, harness_store::ProviderAuthItem, models::CatalogModel,
+    truncate_chars,
+};
+use crate::theme::{DaemonTarget, Palette};
+use crate::ui::panel_controls::{button, control, icon_button, label};
+use crate::ui::text_input::field;
 use crate::ui::workspace::PrimeDesktopView;
 
-pub(super) fn confirm_action(
-    message: &str,
-    action: &'static str,
-    window: &mut gpui::Window,
-    cx: &mut Context<PrimeDesktopView>,
-    confirmed: impl FnOnce(&mut PrimeDesktopView, &mut Context<PrimeDesktopView>) + 'static,
-) {
-    let answer = window.prompt(
-        gpui::PromptLevel::Warning,
-        message,
-        None,
-        &[
-            gpui::PromptButton::cancel("Cancel"),
-            gpui::PromptButton::new(action),
-        ],
-        cx,
-    );
-    cx.spawn(async move |this, cx| {
-        if matches!(answer.await, Ok(1)) {
-            let _ = this.update(cx, confirmed);
-        }
-    })
-    .detach();
+/// Keep the exact target captured at confirmation time (selections can change on daemon events).
+pub(super) struct Confirmation {
+    message: String,
+    action: String,
+    confirmed: Box<dyn FnOnce(&mut PrimeDesktopView)>,
 }
 
-#[must_use]
-pub fn render_active_modal(
-    modal: ActiveModal,
-    view: &PrimeDesktopView,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let (entrance_id, contents) = match modal {
-        ActiveModal::ModelPicker => (
-            "model-picker-entrance",
-            render_model_picker_modal(view, palette, cx),
-        ),
-        ActiveModal::QuickSwitcher => (
-            "quick-switcher-entrance",
-            render_quick_switcher_modal(view, palette, cx),
-        ),
-        ActiveModal::SettingsAuth => (
-            "settings-entrance",
-            render_settings_auth_modal(view, palette, cx),
-        ),
-    };
-    let backdrop = div()
-        .id("modal-backdrop-scrim")
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full()
-        .flex()
-        .items_center()
-        .justify_center()
-        .occlude()
-        .p(px(24.0))
-        .on_click(cx.listener(|this, _, window, cx| {
-            this.close_modal(window, cx);
-        }));
-    let sheet = div()
-        .id("modal-card-surface")
-        .min_w_0()
-        .w_full()
-        .max_w(px(610.0))
-        .max_h_full()
-        .flex()
-        .flex_col()
-        .on_click(|_, _, cx| {
-            cx.stop_propagation();
-        })
-        .child(contents);
-    motion::ModalEntrance {
-        entrance_id,
-        backdrop,
-        sheet,
-        scrim: palette.bg_scrim,
-        reduce_motion: view.prefs.reduce_motion,
+impl PrimeDesktopView {
+    pub(super) fn confirm(
+        &mut self,
+        message: impl Into<String>,
+        action: impl Into<String>,
+        confirmed: impl FnOnce(&mut Self) + 'static,
+    ) {
+        self.confirm = Some(Confirmation {
+            message: message.into(),
+            action: action.into(),
+            confirmed: Box::new(confirmed),
+        });
     }
-    .into_any_element()
-}
 
-#[allow(clippy::too_many_lines)]
-fn render_model_picker_modal(
-    view: &PrimeDesktopView,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let filtered = matching_models(view, cx);
-    let count = filtered.len();
-
-    picker_surface(count, cx)
-        .w_full()
-        .max_h(px(520.0))
-        .rounded_2xl()
-        .border_1()
-        .border_color(palette.border_strong)
-        .bg(palette.bg_elevated)
-        .shadow_lg()
-        .overflow_hidden()
-        .flex()
-        .flex_col()
-        // Header + Search
-        .child(
-            div()
-                .p(px(14.0))
-                .border_b_1()
-                .border_color(palette.border_subtle)
-                .flex()
-                .flex_col()
-                .gap(px(10.0))
+    pub(super) fn active_modal(&self, cx: &mut Cx<Self>) -> Option<El> {
+        let p = Palette::for_mode(self.prefs.theme);
+        let (key, mut card) = if let Some(confirm) = &self.confirm {
+            let buttons = row()
+                .justify_end()
+                .gap(8.0)
                 .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .font_family(font_serif())
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(17.0))
-                                .text_color(palette.text_primary)
-                                .child("Choose a model"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(8.0))
-                                .child(
-                                    div()
-                                        .id("toggle-configured-models")
-                                        .px(px(8.0))
-                                        .py(px(3.5))
-                                        .rounded_md()
-                                        .cursor_pointer()
-                                        .bg(if view.model_picker_configured_only {
-                                            palette.accent_soft
-                                        } else {
-                                            palette.bg_code
-                                        })
-                                        .font_family(font_mono())
-                                        .text_size(px(11.0))
-                                        .text_color(if view.model_picker_configured_only {
-                                            palette.accent
-                                        } else {
-                                            palette.text_secondary
-                                        })
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.model_picker_configured_only =
-                                                !this.model_picker_configured_only;
-                                            this.modal_selected_idx = 0;
-                                            this.modal_scroll.scroll_to_item(0);
-                                            cx.notify();
-                                        }))
-                                        .child(if view.model_picker_configured_only {
-                                            "Configured providers"
-                                        } else {
-                                            "All catalog models"
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .id("close-model-modal")
-                                        .p(px(4.0))
-                                        .cursor_pointer()
-                                        .on_click(cx.listener(|this, _, window, cx| {
-                                            this.close_modal(window, cx);
-                                        }))
-                                        .child(Icon::Close.render(14.0, palette.text_muted)),
-                                ),
-                        ),
+                    button("cancel-confirm", "Cancel", p).on_press(|s: &mut Self| s.confirm = None),
                 )
                 .child(
-                    div()
-                        .px(px(10.0))
-                        .py(px(6.5))
-                        .rounded_lg()
-                        .border_1()
-                        .border_color(palette.accent)
-                        .bg(palette.bg_code)
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(Icon::Search.render(14.0, palette.accent))
-                        .child(div().flex_1().min_w_0().child(view.modal_search_input.clone())),
-                ),
+                    button("accept-confirm", &confirm.action, p)
+                        .fill(p.danger_soft)
+                        .on_press(|s: &mut Self| {
+                            if let Some(confirm) = s.confirm.take() {
+                                (confirm.confirmed)(s);
+                            }
+                        }),
+                );
+            (
+                "confirm-card",
+                col()
+                    .w_full()
+                    .max_w(420.0)
+                    .gap(16.0)
+                    .padding(18.0)
+                    .child(label(&confirm.message, 14.0, 500.0, p.text_primary).wrap())
+                    .child(buttons)
+                    .modal(false, |s: &mut Self| s.confirm = None),
+            )
+        } else {
+            let modal = self.active_modal?;
+            let (key, content) = match modal {
+                ActiveModal::QuickSwitcher => ("quick-switcher", self.picker(false, p)),
+                ActiveModal::ModelPicker => ("model-picker", self.picker(true, p)),
+                ActiveModal::SettingsAuth => ("settings", self.settings(p)),
+            };
+            (
+                key,
+                content.w_full().max_w(610.0).modal(true, Self::close_modal),
+            )
+        };
+        card = card
+            .key(key)
+            .role("dialog")
+            .radius(16.0)
+            .clip_rounded(16.0)
+            .border(1.0, p.border_strong)
+            .fill(p.bg_elevated)
+            .shadow(8.0, 30.0, p.bg_scrim);
+        if !self.prefs.reduce_motion && !cx.is_reduced_motion() {
+            card = card.transition(Transition::scale(0.985));
+        }
+        Some(
+            col()
+                .key("modal-backdrop-scrim")
+                .absolute(0.0, 0.0)
+                .w_full()
+                .h_full()
+                .padding(22.0)
+                .center()
+                .fill(p.bg_scrim)
+                .child(card),
         )
-        // Model Rows
-        .child(
-            div()
-                .id("model-picker-scroll")
-                .track_scroll(&view.modal_scroll)
-                .flex_1()
-                .overflow_y_scroll()
-                .p(px(8.0))
-                .flex()
-                .flex_col()
-                .gap(px(3.0))
-                .when(filtered.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .p(px(20.0))
-                            .text_size(px(13.0))
-                            .text_color(palette.text_muted)
-                            .child("No matching models. Try another search or change the provider filter."),
-                    )
-                })
-                .children(filtered.into_iter().enumerate().map(|(index, m)| {
-                    let is_current = view.session.model_provider.as_deref()
-                        == Some(m.provider.as_str())
-                        && view.session.model_id.as_deref() == Some(m.id.as_str());
-                    let prov = m.provider.clone();
-                    let mid = m.id.clone();
+    }
 
-                    div()
-                        .id(SharedString::from(format!("pick-m-{}/{}", m.provider, m.id))).flex_none().min_w_0()
-                        .px(px(12.0))
-                        .py(px(8.5))
-                        .rounded_xl()
-                        .cursor_pointer()
-                        .bg(if index == view.modal_selected_idx.min(count.saturating_sub(1)) {
-                            palette.bg_selected
-                        } else {
-                            gpui::transparent_black()
-                        })
-                        .hover(|s| s.bg(palette.bg_hover))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(10.0))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.select_model(&prov, &mid, window, cx);
-                        }))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .min_w_0().flex_1().overflow_hidden()
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(7.0))
-                                        .child(
-                                            div()
-                                                .font_family(font_sans())
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_size(px(13.0))
-                                                .text_color(palette.text_primary)
-                                                .min_w_0().truncate().child(m.name.clone()),
-                                        )
-                                        .when(is_current, |d| {
-                                            d.child(Icon::Check.render(13.0, palette.accent))
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(font_mono())
-                                        .text_size(px(11.0))
-                                        .text_color(palette.text_muted)
-                                        .min_w_0().truncate().child(format!("{} · {}", m.provider_display(), m.id)),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(5.0))
-                                .flex_none()
-                                .when(m.reasoning, |d| {
-                                    d.child(pill("reasoning", palette.accent_soft, palette.accent))
-                                })
-                                .when(m.supports_images, |d| {
-                                    d.child(pill("vision", palette.info_soft, palette.info))
-                                })
-                                .child(pill(
-                                    &format_tokens_compact(m.context_window),
-                                    palette.bg_code,
-                                    palette.text_secondary,
-                                )),
-                        )
-                })),
-        )
-        .into_any_element()
-}
+    fn matching_models(&self) -> Vec<&CatalogModel> {
+        let query = &self.modal_search_input.text;
+        self.catalog_models
+            .iter()
+            .filter(|m| {
+                (!self.model_picker_configured_only || m.configured) && m.matches_query(query)
+            })
+            .take(90)
+            .collect()
+    }
 
-fn matching_models<'a>(
-    view: &'a PrimeDesktopView,
-    cx: &App,
-) -> Vec<&'a crate::state::models::CatalogModel> {
-    let query = view.modal_search_input.read(cx).text();
-    view.catalog_models
-        .iter()
-        .filter(|m| (!view.model_picker_configured_only || m.configured) && m.matches_query(query))
-        .take(90)
-        .collect()
-}
-
-// Arrow keys belong to the result list while the search field retains text entry and IME focus.
-fn picker_surface(count: usize, cx: &Context<PrimeDesktopView>) -> gpui::Div {
-    div()
-        .capture_action(cx.listener(move |view, _: &Up, _, cx| {
-            view.modal_selected_idx = view
+    fn picker(&self, models: bool, p: Palette) -> El {
+        let mut header = row().h(32.0).gap(6.0).center_y().child(
+            label(
+                if models {
+                    "Choose a model"
+                } else {
+                    "Quick switcher"
+                },
+                17.0,
+                600.0,
+                p.text_primary,
+            )
+            .grow(1.0)
+            .min_w(0.0),
+        );
+        if models {
+            let title = if self.model_picker_configured_only {
+                "Configured providers"
+            } else {
+                "All catalog models"
+            };
+            header = header.child(
+                button("toggle-configured-models", title, p)
+                    .fill(if self.model_picker_configured_only {
+                        p.accent_soft
+                    } else {
+                        p.bg_code
+                    })
+                    .on_press_tx(|s: &mut Self, tx| {
+                        s.model_picker_configured_only = !s.model_picker_configured_only;
+                        s.modal_selected_idx = 0;
+                        tx.scroll_to_y("picker-results", 0.0);
+                    }),
+            );
+        }
+        header = header.child(
+            icon_button("close-picker", "Close", Icon::Close, p).on_press(Self::close_modal),
+        );
+        let mut rows = Vec::new();
+        if models {
+            let matching = self.matching_models();
+            let selected = self
                 .modal_selected_idx
-                .saturating_sub(1)
-                .min(count.saturating_sub(1));
-            view.modal_scroll.scroll_to_item(view.modal_selected_idx);
-            cx.stop_propagation();
-            cx.notify();
-        }))
-        .capture_action(cx.listener(move |view, _: &Down, _, cx| {
-            view.modal_selected_idx = (view.modal_selected_idx + 1).min(count.saturating_sub(1));
-            view.modal_scroll.scroll_to_item(view.modal_selected_idx);
-            cx.stop_propagation();
-            cx.notify();
-        }))
+                .min(matching.len().saturating_sub(1));
+            for (index, model) in matching.into_iter().enumerate() {
+                let provider = model.provider.clone();
+                let id = model.id.clone();
+                let is_current = self.session.model_provider.as_deref() == Some(&provider)
+                    && self.session.model_id.as_deref() == Some(&id);
+                let mut badges = Vec::new();
+                if model.reasoning {
+                    badges.push("reasoning".into());
+                }
+                if model.supports_images {
+                    badges.push("vision".into());
+                }
+                badges.push(format_tokens_compact(model.context_window));
+                let title = row()
+                    .gap(5.0)
+                    .center_y()
+                    .child(label(&model.name, 13.0, 500.0, p.text_primary).truncate());
+                let title = if is_current {
+                    title.child(Icon::Check.render(13.0, p.accent))
+                } else {
+                    title
+                };
+                let content = row()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .center_y()
+                    .gap(6.0)
+                    .child(
+                        col().grow(1.0).min_w(0.0).gap(2.0).child(title).child(
+                            label(
+                                format!("{} · {id}", model.provider_display()),
+                                11.0,
+                                400.0,
+                                p.text_muted,
+                            )
+                            .truncate(),
+                        ),
+                    )
+                    .children(badges.into_iter().map(|b| {
+                        label(b, 10.0, 400.0, p.text_secondary)
+                            .px(5.0)
+                            .py(3.0)
+                            .radius(5.0)
+                            .fill(p.bg_code)
+                    }));
+                rows.push(
+                    result_row(index, &model.name, selected, p)
+                        .child(content)
+                        .on_press(move |s: &mut Self| s.select_model(&provider, &id)),
+                );
+            }
+        } else {
+            let commands = switch_rows(self);
+            let selected = self
+                .modal_selected_idx
+                .min(commands.len().saturating_sub(1));
+            for (index, command) in commands.into_iter().enumerate() {
+                let title = command.title.clone();
+                let content = row()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .center_y()
+                    .gap(7.0)
+                    .child(
+                        label(title, 13.0, 500.0, p.text_primary)
+                            .grow(1.0)
+                            .min_w(0.0)
+                            .truncate(),
+                    )
+                    .child(
+                        label(command.hint, 11.0, 400.0, p.text_muted)
+                            .max_w(170.0)
+                            .truncate(),
+                    );
+                rows.push(
+                    result_row(index, &command.title, selected, p)
+                        .child(content.key(command.id))
+                        .on_press(move |s: &mut Self| command.target.activate(s)),
+                );
+            }
+        }
+        let count = rows.len();
+        let placeholder = if models {
+            "Search models or providers…"
+        } else {
+            "Search commands, projects, or chats…"
+        };
+        let search = field(
+            "modal-search",
+            &self.modal_search_input,
+            placeholder,
+            p,
+            |s| &mut s.modal_search_input,
+        )
+        .single_line()
+        .min_w(0.0)
+        .grow(1.0)
+        .on_submit(|s: &mut Self, _| s.submit_modal_selection())
+        .on_input_key(move |s: &mut Self, event, tx| {
+            match event.key {
+                Key::Up => {
+                    s.modal_selected_idx = s
+                        .modal_selected_idx
+                        .saturating_sub(1)
+                        .min(count.saturating_sub(1))
+                }
+                Key::Down => {
+                    s.modal_selected_idx = (s.modal_selected_idx + 1).min(count.saturating_sub(1))
+                }
+                Key::Text(_) | Key::Backspace | Key::Delete => {
+                    s.modal_selected_idx = 0;
+                    tx.scroll_to_y("picker-results", 0.0);
+                    return false;
+                }
+                _ => return false,
+            }
+            if count > 0 {
+                tx.scroll_into_view(format!("picker-row-{}", s.modal_selected_idx));
+            }
+            true
+        });
+        if rows.is_empty() {
+            rows.push(
+                label(
+                    if models {
+                        "No matching models. Try another search or change the provider filter."
+                    } else {
+                        "No matching commands, projects, or chats."
+                    },
+                    13.0,
+                    400.0,
+                    p.text_muted,
+                )
+                .padding(12.0)
+                .wrap(),
+            );
+        }
+        col()
+            .h(if models { 480.0 } else { 410.0 })
+            .min_h(0.0)
+            .shrink()
+            .child(
+                col().padding(14.0).gap(8.0).child(header).child(
+                    row()
+                        .h(34.0)
+                        .px(8.0)
+                        .gap(7.0)
+                        .center_y()
+                        .radius(8.0)
+                        .border(1.0, p.accent)
+                        .fill(p.bg_code)
+                        .child(Icon::Search.render(14.0, p.text_muted))
+                        .child(search),
+                ),
+            )
+            .child(el().h(1.0).fill(p.border_subtle))
+            .child(
+                col()
+                    .key("picker-results")
+                    .min_h(0.0)
+                    .grow(1.0)
+                    .scroll(ScrollSpec {
+                        stick_bottom: false,
+                    })
+                    .child(col().padding(8.0).gap(2.0).children(rows)),
+            )
+    }
+
+    fn settings(&self, p: Palette) -> El {
+        let header = row()
+            .h(50.0)
+            .px(15.0)
+            .center_y()
+            .gap(8.0)
+            .child(Icon::Shield.render(16.0, p.accent))
+            .child(label("Settings", 17.0, 600.0, p.text_primary).grow(1.0))
+            .child(
+                icon_button("close-settings", "Close settings", Icon::Close, p)
+                    .on_press(Self::close_modal),
+            );
+        let motion = control("reduce-motion", "Reduce motion", p)
+            .role("switch")
+            .checked(self.prefs.reduce_motion)
+            .h(32.0)
+            .px(8.0)
+            .center_y()
+            .child(label("Reduce motion", 13.0, 500.0, p.text_primary).grow(1.0))
+            .child(label(
+                if self.prefs.reduce_motion {
+                    "On"
+                } else {
+                    "Off"
+                },
+                12.0,
+                500.0,
+                p.accent,
+            ))
+            .on_press(Self::toggle_reduce_motion);
+        let mut locations = row().gap(8.0).child(
+            button("choose-cli-folder", "Choose folder…", p).on_press(Self::prompt_choose_cli_dir),
+        );
+        if self.prefs.cli_data_dir.is_some() {
+            locations = locations.child(
+                button("reset-cli-folder", "Use default", p)
+                    .on_press(|s: &mut Self| s.use_cli_folder(None)),
+            );
+        }
+        let data = settings_group(p)
+            .child(label("Prime Agent CLI data", 13.0, 600.0, p.text_primary))
+            .child(
+                label(
+                    "Chats, saved credentials and settings are shared with the CLI in this folder.",
+                    12.0,
+                    400.0,
+                    p.text_secondary,
+                )
+                .wrap(),
+            )
+            .child(
+                label(
+                    self.agent_dir.display().to_string(),
+                    11.0,
+                    400.0,
+                    p.text_muted,
+                )
+                .wrap_anywhere(),
+            )
+            .child(locations);
+        let mut connection = settings_group(p)
+            .child(label(
+                self.prefs.daemon_target.label(),
+                13.0,
+                600.0,
+                p.text_primary,
+            ))
+            .child(label(&self.daemon_socket_display, 11.0, 400.0, p.text_muted).wrap_anywhere());
+        if self.prefs.cli_data_dir.is_none() {
+            let title = match self.prefs.daemon_target {
+                DaemonTarget::DesktopHarness => "Attach to CLI daemon",
+                DaemonTarget::SharedCli => "Use desktop daemon",
+            };
+            connection = connection.child(
+                button("settings-switch-daemon-btn", title, p).on_press(Self::switch_daemon_target),
+            );
+        }
+        let content = col()
+            .padding(14.0)
+            .gap(10.0)
+            .child(motion)
+            .child(data)
+            .child(connection)
+            .child(label("Provider credentials", 14.0, 600.0, p.text_primary))
+            .children(
+                self.provider_auth
+                    .iter()
+                    .map(|item| self.credential_row(item, p)),
+            );
+        col()
+            .h(600.0)
+            .min_h(0.0)
+            .shrink()
+            .child(header)
+            .child(el().h(1.0).fill(p.border_subtle))
+            .child(
+                col()
+                    .key("settings-scroll")
+                    .min_h(0.0)
+                    .grow(1.0)
+                    .scroll(ScrollSpec {
+                        stick_bottom: false,
+                    })
+                    .child(content),
+            )
+    }
+
+    fn credential_row(&self, item: &ProviderAuthItem, p: Palette) -> El {
+        let selected = item.can_edit_api_key && self.selected_auth_provider == item.provider_id;
+        let mut summary = row()
+            .key(format!("auth-prov-{}", item.provider_id))
+            .center_y()
+            .gap(6.0)
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .gap(2.0)
+                    .child(label(&item.display_name, 13.0, 500.0, p.text_primary))
+                    .child(label(&item.hint, 11.0, 400.0, p.text_secondary).wrap()),
+            )
+            .child(label(
+                &item.auth_kind,
+                11.0,
+                500.0,
+                if item.configured {
+                    p.success
+                } else {
+                    p.text_muted
+                },
+            ));
+        if item.can_edit_api_key {
+            let pid = item.provider_id.clone();
+            summary = summary
+                .role("button")
+                .label(&item.display_name)
+                .focusable(true)
+                .cursor(rune::Cursor::Pointer)
+                .hover(p.bg_hover)
+                .on_press(move |s: &mut Self| {
+                    if s.selected_auth_provider != pid {
+                        s.api_key_input.replace_text("");
+                    }
+                    s.selected_auth_provider.clone_from(&pid);
+                    s.focus_input(|s| &mut s.api_key_input);
+                });
+        }
+        let mut card = settings_group(p).child(summary);
+        if selected {
+            let has_key = !self.api_key_input.text.trim().is_empty();
+            let input = field("api-key", &self.api_key_input, "API key", p, |s| {
+                &mut s.api_key_input
+            })
+            .single_line()
+            .grow(1.0)
+            .min_w(0.0)
+            .on_submit(|s: &mut Self, _| {
+                if !s.api_key_input.text.trim().is_empty() && !s.auth_write_pending {
+                    s.save_selected_provider_key();
+                }
+            });
+            let mut editor = row()
+                .h(32.0)
+                .gap(6.0)
+                .px(7.0)
+                .center_y()
+                .radius(6.0)
+                .border(1.0, p.border_subtle)
+                .child(input);
+            if self.auth_write_pending {
+                editor = editor.child(label("Updating…", 12.0, 400.0, p.text_muted));
+            } else if has_key {
+                editor = editor.child(
+                    button("save-provider-key-btn", "Save key", p)
+                        .on_press(Self::save_selected_provider_key),
+                );
+            } else if item.has_stored_api_key {
+                editor = editor.child(
+                    button("remove-provider-key-btn", "Remove key…", p).on_press(|s: &mut Self| {
+                        let provider = s.selected_auth_provider.clone();
+                        let dir = s.agent_dir.clone();
+                        s.confirm(
+                            format!("Remove the saved API key for {provider}?"),
+                            "Remove key",
+                            move |s| {
+                                if s.selected_auth_provider == provider
+                                    && s.agent_dir == dir
+                                    && s.api_key_input.text.trim().is_empty()
+                                    && !s.auth_write_pending
+                                {
+                                    s.save_selected_provider_key();
+                                }
+                            },
+                        );
+                    }),
+                );
+            }
+            card = card.border(1.0, p.accent).child(editor);
+        }
+        card
+    }
 }
 
+fn settings_group(p: Palette) -> El {
+    col()
+        .padding(10.0)
+        .gap(5.0)
+        .radius(10.0)
+        .border(1.0, p.border_subtle)
+        .fill(p.bg_canvas)
+}
+
+fn result_row(index: usize, title: &str, selected: usize, p: Palette) -> El {
+    let item = control(format!("picker-row-{index}"), title, p)
+        .h(43.0)
+        .px(8.0)
+        .center_y();
+    if index == selected {
+        item.fill(p.bg_selected)
+    } else {
+        item
+    }
+}
 enum SwitchTarget {
     Command(&'static str),
     Project(String),
@@ -350,48 +559,43 @@ struct SwitchRow {
 }
 
 impl SwitchTarget {
-    fn activate(
-        &self,
-        view: &mut PrimeDesktopView,
-        window: &mut Window,
-        cx: &mut Context<PrimeDesktopView>,
-    ) {
+    fn activate(&self, view: &mut PrimeDesktopView) {
         match self {
-            Self::Command(id) => view.execute_palette_action(id, window, cx),
+            Self::Command(id) => view.execute_palette_action(id),
             Self::Project(cwd) => {
-                view.close_modal(window, cx);
+                view.close_modal();
                 if !view.prefs.sidebar_open {
-                    view.toggle_sidebar(window, cx);
+                    view.toggle_sidebar();
                 }
-                view.focus_sidebar_project(cwd, cx);
-                window.focus(&view.sidebar_search_input.focus_handle(cx));
+                view.focus_sidebar_project(cwd);
+                view.focus_input(|s| &mut s.sidebar_search_input);
             }
             Self::Chat(request) => {
-                view.open_session(request.clone(), cx);
-                view.close_modal(window, cx);
+                view.open_session(request.clone());
+                view.close_modal();
             }
         }
     }
 }
 
 impl PrimeDesktopView {
-    pub(super) fn submit_modal_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn submit_modal_selection(&mut self) {
         match self.active_modal {
             Some(ActiveModal::ModelPicker) => {
-                let models = matching_models(self, cx);
+                let models = self.matching_models();
                 if let Some(model) =
                     models.get(self.modal_selected_idx.min(models.len().saturating_sub(1)))
                 {
                     let (provider, id) = (model.provider.clone(), model.id.clone());
-                    self.select_model(&provider, &id, window, cx);
+                    self.select_model(&provider, &id);
                 }
             }
             Some(ActiveModal::QuickSwitcher) => {
-                let rows = switch_rows(self, cx);
+                let rows = switch_rows(self);
                 if let Some(row) =
                     rows.get(self.modal_selected_idx.min(rows.len().saturating_sub(1)))
                 {
-                    row.target.activate(self, window, cx);
+                    row.target.activate(self);
                 }
             }
             Some(ActiveModal::SettingsAuth) | None => {}
@@ -399,13 +603,8 @@ impl PrimeDesktopView {
     }
 }
 
-fn switch_rows(view: &PrimeDesktopView, cx: &App) -> Vec<SwitchRow> {
-    let q = view
-        .modal_search_input
-        .read(cx)
-        .text()
-        .trim()
-        .to_ascii_lowercase();
+fn switch_rows(view: &PrimeDesktopView) -> Vec<SwitchRow> {
+    let q = view.modal_search_input.text.trim().to_ascii_lowercase();
     let actions = [
         ("act-new", "New chat in this project", "⌘N", "Ctrl+N"),
         ("act-model", "Switch model", "⌘M", "Ctrl+M"),
@@ -501,444 +700,4 @@ fn switch_rows(view: &PrimeDesktopView, cx: &App) -> Vec<SwitchRow> {
             }),
     );
     rows
-}
-
-fn render_quick_switcher_modal(
-    view: &PrimeDesktopView,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    let rows = switch_rows(view, cx);
-    let count = rows.len();
-    picker_surface(count, cx)
-        .w_full()
-        .max_h(px(480.0))
-        .rounded_2xl()
-        .border_1()
-        .border_color(palette.border_strong)
-        .bg(palette.bg_elevated)
-        .shadow_lg()
-        .overflow_hidden()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .p(px(12.0))
-                .border_b_1()
-                .border_color(palette.border_subtle)
-                .flex()
-                .items_center()
-                .gap(px(8.0))
-                .child(Icon::Search.render(15.0, palette.accent))
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(view.modal_search_input.clone()),
-                ),
-        )
-        .child(
-            div()
-                .id("quick-switcher-scroll")
-                .track_scroll(&view.modal_scroll)
-                .flex_1()
-                .overflow_y_scroll()
-                .p(px(8.0))
-                .flex()
-                .flex_col()
-                .gap(px(3.0))
-                .when(rows.is_empty(), |d| {
-                    d.child(
-                        div()
-                            .p(px(16.0))
-                            .text_color(palette.text_secondary)
-                            .child("No matching commands, projects, or chats."),
-                    )
-                })
-                .children(rows.into_iter().enumerate().map(|(index, row)| {
-                    let project = matches!(row.target, SwitchTarget::Project(_));
-                    let command = matches!(row.target, SwitchTarget::Command(_));
-                    div()
-                        .id(SharedString::from(row.id))
-                        .flex_none()
-                        .min_w_0()
-                        .px(px(12.0))
-                        .py(px(8.0))
-                        .rounded_lg()
-                        .cursor_pointer()
-                        .when(
-                            index == view.modal_selected_idx.min(count.saturating_sub(1)),
-                            |d| d.bg(palette.bg_selected),
-                        )
-                        .hover(|s| s.bg(palette.bg_hover))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .on_click(cx.listener(move |view, _, window, cx| {
-                            row.target.activate(view, window, cx);
-                        }))
-                        .when(project, |d| {
-                            d.child(Icon::Folder.render(14.0, palette.accent))
-                        })
-                        .child(
-                            div()
-                                .min_w_0()
-                                .flex_1()
-                                .truncate()
-                                .text_size(px(13.0))
-                                .text_color(palette.text_primary)
-                                .child(row.title),
-                        )
-                        .when(!row.hint.is_empty(), |d| {
-                            d.child(
-                                div()
-                                    .min_w_0()
-                                    .max_w(px(150.0))
-                                    .truncate()
-                                    .when(command, |d| d.font_family(font_mono()).flex_none())
-                                    .text_size(px(11.0))
-                                    .text_color(palette.text_muted)
-                                    .child(row.hint),
-                            )
-                        })
-                })),
-        )
-        .into_any_element()
-}
-
-#[allow(clippy::too_many_lines)]
-fn render_settings_auth_modal(
-    view: &PrimeDesktopView,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> AnyElement {
-    div()
-        .capture_key_down(cx.listener(PrimeDesktopView::tab_settings))
-        .w_full()
-        .max_h(px(520.0))
-        .rounded_2xl()
-        .border_1()
-        .border_color(palette.border_strong)
-        .bg(palette.bg_elevated)
-        .shadow_lg()
-        .overflow_hidden()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .px(px(16.0))
-                .py(px(13.0))
-                .border_b_1()
-                .border_color(palette.border_subtle)
-                .flex()
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(8.0))
-                        .child(Icon::Shield.render(16.0, palette.accent))
-                        .child(
-                            div()
-                                .font_family(font_serif())
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_size(px(17.0))
-                                .text_color(palette.text_primary)
-                                .child("Settings"),
-                        ),
-                )
-                .child(
-                    div()
-                        .id("close-settings-modal")
-                        .p(px(4.0))
-                        .cursor_pointer()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.close_modal(window, cx);
-                        }))
-                        .child(Icon::Close.render(14.0, palette.text_muted)),
-                ),
-        )
-        .child(
-            div()
-                .id("settings-modal-scroll")
-                .p(px(16.0))
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .gap(px(12.0))
-                .child(
-                    div()
-                        .id("reduce-motion")
-                        .debug_selector(|| "reduce-motion".into())
-                        .track_focus(&view.settings_motion_focus)
-                        .cursor_pointer()
-                        .flex_none()
-                        .min_w_0()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(12.0))
-                        .p(px(12.0))
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(palette.border_subtle)
-                        .bg(palette.bg_canvas)
-                        .hover(|s| s.bg(palette.bg_hover))
-                        .focus(|s| s.border_color(palette.accent))
-                        .on_click(cx.listener(|view, _, _, cx| view.toggle_reduce_motion(cx)))
-                        .child(
-                            div()
-                                .text_size(px(13.0))
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("Reduce motion"),
-                        )
-                        .child(pill(
-                            if view.prefs.reduce_motion {
-                                "On"
-                            } else {
-                                "Off"
-                            },
-                            if view.prefs.reduce_motion {
-                                palette.accent_soft
-                            } else {
-                                palette.bg_hover
-                            },
-                            if view.prefs.reduce_motion {
-                                palette.accent
-                            } else {
-                                palette.text_secondary
-                            },
-                        )),
-                )
-                .child(view.cli_data_card(palette, cx))
-                // Daemon Socket Info Card
-                .child(
-                    div()
-                        .p(px(12.0))
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(palette.border_subtle)
-                        .bg(palette.bg_canvas)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(palette.text_primary)
-                                        .child(view.prefs.daemon_target.label()),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(font_mono())
-                                        .text_size(px(11.0))
-                                        .text_color(palette.text_muted)
-                                        .min_w_0()
-                                        .truncate()
-                                        .child(view.daemon_socket_display.clone()),
-                                ),
-                        )
-                        .when(view.prefs.cli_data_dir.is_none(), |card| {
-                            card.child(
-                                div()
-                                    .id("settings-switch-daemon-btn")
-                                    .flex_none()
-                                    .whitespace_nowrap()
-                                    .px(px(10.0))
-                                    .py(px(5.0))
-                                    .rounded_lg()
-                                    .bg(palette.accent_soft)
-                                    .cursor_pointer()
-                                    .text_size(px(12.0))
-                                    .text_color(palette.accent)
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.switch_daemon_target(cx);
-                                    }))
-                                    .child(match view.prefs.daemon_target {
-                                        crate::theme::DaemonTarget::DesktopHarness => {
-                                            "Attach to CLI daemon"
-                                        }
-                                        crate::theme::DaemonTarget::SharedCli => {
-                                            "Use desktop daemon"
-                                        }
-                                    }),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .text_size(px(13.0))
-                        .text_color(palette.text_primary)
-                        .child("Provider credentials"),
-                )
-                .children(view.provider_auth.iter().map(|item| {
-                    let pid = item.provider_id.clone();
-                    let is_sel =
-                        item.can_edit_api_key && view.selected_auth_provider == item.provider_id;
-                    let row = div()
-                        .id(SharedString::from(format!(
-                            "auth-prov-{}",
-                            item.provider_id
-                        )))
-                        .px(px(12.0))
-                        .py(px(9.0))
-                        .rounded_xl()
-                        .border_1()
-                        .border_color(if is_sel {
-                            palette.accent
-                        } else {
-                            palette.border_subtle
-                        })
-                        .bg(palette.bg_canvas)
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .when(item.can_edit_api_key, |row| {
-                            row.cursor_pointer().on_click(cx.listener(
-                                move |this, _, window, cx| {
-                                    if this.selected_auth_provider != pid {
-                                        this.api_key_input
-                                            .update(cx, crate::ui::text_input::TextInput::clear);
-                                    }
-                                    this.selected_auth_provider.clone_from(&pid);
-                                    window.focus(&this.api_key_input.focus_handle(cx));
-                                    cx.notify();
-                                },
-                            ))
-                        })
-                        .child(
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .font_weight(FontWeight::MEDIUM)
-                                        .text_color(palette.text_primary)
-                                        .child(item.display_name.clone()),
-                                )
-                                .child(
-                                    div()
-                                        .font_family(font_mono())
-                                        .text_size(px(11.0))
-                                        .text_color(palette.text_muted)
-                                        .child(item.hint.clone()),
-                                ),
-                        )
-                        .child(pill(
-                            &item.auth_kind,
-                            if item.configured {
-                                palette.success_soft
-                            } else {
-                                palette.bg_hover
-                            },
-                            if item.configured {
-                                palette.success
-                            } else {
-                                palette.text_muted
-                            },
-                        ));
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.0))
-                        .child(row)
-                        .when(is_sel, |group| {
-                            group.child(render_api_key_editor(view, item, palette, cx))
-                        })
-                })),
-        )
-        .into_any_element()
-}
-
-fn render_api_key_editor(
-    view: &PrimeDesktopView,
-    item: &ProviderAuthItem,
-    palette: Palette,
-    cx: &mut Context<PrimeDesktopView>,
-) -> gpui::Div {
-    let has_new_key = !view.api_key_input.read(cx).text().trim().is_empty();
-    div()
-        .p(px(12.0))
-        .rounded_xl()
-        .border_1()
-        .border_color(palette.border_subtle)
-        .bg(palette.bg_canvas)
-        .flex()
-        .items_center()
-        .gap(px(8.0))
-        .child(
-            div()
-                .flex_1()
-                .px(px(9.0))
-                .py(px(6.0))
-                .rounded_lg()
-                .bg(palette.bg_code)
-                .child(view.api_key_input.clone()),
-        )
-        .when(view.auth_write_pending, |row| {
-            row.child(pill("Updating…", palette.bg_hover, palette.text_muted))
-        })
-        .when(!view.auth_write_pending && has_new_key, |row| {
-            row.child(
-                div()
-                    .id("save-provider-key-btn")
-                    .px(px(12.0))
-                    .py(px(6.0))
-                    .rounded_lg()
-                    .bg(palette.accent)
-                    .cursor_pointer()
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::MEDIUM)
-                    .text_color(palette.text_on_accent)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.save_selected_provider_key(cx);
-                    }))
-                    .child("Save key"),
-            )
-        })
-        .when(
-            !view.auth_write_pending && item.has_stored_api_key && !has_new_key,
-            |row| {
-                row.child(
-                    div()
-                        .id("remove-provider-key-btn")
-                        .px(px(12.0))
-                        .py(px(6.0))
-                        .rounded_lg()
-                        .bg(palette.bg_hover)
-                        .cursor_pointer()
-                        .text_size(px(12.5))
-                        .text_color(palette.text_secondary)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            let provider = this.selected_auth_provider.clone();
-                            let agent_dir = this.agent_dir.clone();
-                            confirm_action(
-                                &format!("Remove the saved API key for {provider}?"),
-                                "Remove key",
-                                window,
-                                cx,
-                                move |this, cx| {
-                                    if this.selected_auth_provider == provider
-                                        && this.agent_dir == agent_dir
-                                        && this.api_key_input.read(cx).text().trim().is_empty()
-                                    {
-                                        this.save_selected_provider_key(cx);
-                                    }
-                                },
-                            );
-                        }))
-                        .child("Remove key…"),
-                )
-            },
-        )
 }

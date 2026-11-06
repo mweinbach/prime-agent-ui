@@ -1,6 +1,6 @@
 # pa-desktop
 
-`prime-agent-ui` is the native GPUI desktop app for Prime Agent. It talks to the `prime-agent` daemon built from the pinned [`harness/`](../../harness) submodule.
+`prime-agent-ui` is the native Rune desktop app for Prime Agent. It talks to the `prime-agent` daemon built from the pinned [`harness/`](../../harness) submodule.
 
 For Windows and Linux builds, see [Download or build](../../README.md#download-or-build). On those platforms the app uses Ctrl in place of the Command key shown in the macOS shortcuts below.
 
@@ -53,7 +53,7 @@ Project list telemetry is off unless you explicitly set `telemetry.enabled` to `
 make test
 ```
 
-The composer test uses GPUI's in-memory `TestWindow`. It selects a session, clicks the composer, types a prompt and presses Return. A real daemon in a temporary directory runs the scripted `faux` provider. The test checks the draft, prompt and reply without opening the app, sending OS input, or using provider credentials.
+The composer test uses Rune’s headless `Runtime`. It selects a session, clicks the composer, types a prompt and presses Return. A real daemon in a temporary directory runs the scripted `faux` provider. The test checks the draft, prompt and reply without opening the app, sending OS input, or using provider credentials.
 
 The kernel-backed subagent test requires an already provisioned Prime Agent kernel interpreter. To exercise live spawn, completion, and parent/child navigation without opening a window:
 
@@ -92,7 +92,7 @@ PA_E2E_KERNEL_PYTHON="$HOME/.prime/agent/kernel-venv/bin/python" nice -n 10 carg
 
 ## Scope
 
-- Native Metal-accelerated desktop UI built on Zed's `gpui` (`0.2.2`).
+- Native GPU-rendered desktop UI built on a pinned revision of [Rune](https://github.com/anomalyco/rune).
 - Non-blocking async JSONL daemon bridge (`bridge/`) over `pa-types` wire frames on a 2-thread Tokio worker.
 - Dual daemon target support: dedicated `DesktopHarness` supervisor (`desktop-daemon.sock`) and `SharedCli` (`daemon.sock`).
 - Continual Harness Studio (`state/harness_store.rs`, `ui/inspector.rs`) backed by `pa-core::refinement` (`<agent_dir>/harness` and `<agent_dir>/session-artifacts/<id>/harness`).
