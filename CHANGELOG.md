@@ -1,5 +1,12 @@
 # Desktop changes
 
+## 0.11.0
+
+- The desktop now runs on Rune. It keeps Google Sans and the light and dark themes, with simpler project and chat sidebars and a quieter inspector.
+- Search models by name or provider and choose reasoning effort from the composer, even before sending the first message. Switching chats preserves the unsent draft when browsing prompt history.
+- Preview attached images, text, and code before sending. The composer sends the contents you previewed, even if the source file changes.
+- Connect an inference provider from Settings, the model picker, or `/login`. Prime Inference supports browser sign-in, API keys, and team selection. OpenAI Codex, Anthropic, GitHub Copilot, and xAI support subscription sign-in. Desktop shares credentials with the selected CLI profile.
+
 ## 0.10.3
 
 - Apple Silicon Mac releases support signed Sparkle updates through the Prime Agent menu. Install this version manually once when upgrading from 0.10.2.

@@ -8,7 +8,7 @@ To connect an inference provider from the app, open **Settings → Connect provi
 
 [Download the latest Apple Silicon Mac app](https://github.com/mweinbach/prime-agent-ui/releases/latest/download/prime-agent-ui-macos-arm64.zip). Unzip it, quit any running copy, and move **Prime Agent.app** into **Applications**.
 
-Beginning with the first update-enabled release (0.10.3), use **Prime Agent → Check for Updates…** or allow Sparkle to check periodically. Users coming from 0.10.2 need to install the new app manually once. The stable [Sparkle appcast](https://github.com/mweinbach/prime-agent-ui/releases/latest/download/appcast.xml) becomes available when the first signed feed is published.
+If you have Prime Agent Desktop 0.10.3 or later on your Mac, use **Prime Agent → Check for Updates…** or allow Sparkle to check periodically. If you’re upgrading from 0.10.2, install the new app manually once. Updates use the [signed stable feed](https://github.com/mweinbach/prime-agent-ui/releases/latest/download/appcast.xml).
 
 [Tagged releases](https://github.com/mweinbach/prime-agent-ui/releases) are published only when all four platform builds pass. Each archive includes the desktop app, the CLI daemon it was built with, the Python runtime source, and the built-in skills. Extract the whole archive before launching.
 
