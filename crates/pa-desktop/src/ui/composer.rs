@@ -12,7 +12,7 @@ use crate::bridge::BridgeRequest;
 use crate::state::ActiveModal;
 use crate::theme::Palette;
 
-const SLASH_SUGGESTIONS: [(&str, &str); 8] = [
+const SLASH_SUGGESTIONS: [(&str, &str); 9] = [
     ("/compact", "Summarize & compact conversation context"),
     ("/refine", "Refine the session harness"),
     (
@@ -24,6 +24,7 @@ const SLASH_SUGGESTIONS: [(&str, &str); 8] = [
         "Reload skills, system prompt, and session configuration",
     ),
     ("/model", "Choose a model"),
+    ("/login", "Connect an inference provider"),
     (
         "/btw ",
         "Ask a parallel side question without interrupting the turn",

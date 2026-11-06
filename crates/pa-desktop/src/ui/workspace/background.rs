@@ -11,6 +11,15 @@ use super::{BridgeHandle, PrimeDesktopView};
 
 type Completion = Box<dyn FnOnce(&mut PrimeDesktopView) + Send>;
 
+#[derive(Clone)]
+pub(super) struct Poster(mpsc::UnboundedSender<Completion>);
+
+impl Poster {
+    pub(super) fn post(&self, complete: impl FnOnce(&mut PrimeDesktopView) + Send + 'static) {
+        let _ = self.0.unbounded_send(Box::new(complete));
+    }
+}
+
 pub(super) struct Background {
     tx: mpsc::UnboundedSender<Completion>,
     rx: mpsc::UnboundedReceiver<Completion>,
@@ -20,6 +29,10 @@ impl Background {
     pub(super) fn new() -> Self {
         let (tx, rx) = mpsc::unbounded();
         Self { tx, rx }
+    }
+
+    pub(super) fn poster(&self) -> Poster {
+        Poster(self.tx.clone())
     }
 
     pub(super) fn run<F, Done>(&self, bridge: &BridgeHandle, work: F)

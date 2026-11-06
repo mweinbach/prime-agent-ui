@@ -2,6 +2,8 @@
 
 An unofficial desktop client for [Prime Agent](https://github.com/PrimeIntellect-ai/prime-agent), built with [Rune](https://github.com/anomalyco/rune). It uses the Prime Agent daemon and reads the same saved chats and provider credentials as the CLI. Credentials and conversations are not distributed in this repository.
 
+To connect an inference provider from the app, open **Settings → Connect provider…** or type `/login` in the composer. See the [desktop guide](crates/pa-desktop/README.md#use-your-prime-agent-cli-data) for sign-in methods and shared CLI credentials.
+
 ## Download or build
 
 [Download the latest Apple Silicon Mac app](https://github.com/mweinbach/prime-agent-ui/releases/latest/download/prime-agent-ui-macos-arm64.zip). Unzip it, quit any running copy, and move **Prime Agent.app** into **Applications**.

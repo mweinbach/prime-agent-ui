@@ -84,6 +84,9 @@ impl PrimeDesktopView {
         if !matches!(self.selection, SessionSelection::Idle) || cwd.is_empty() {
             return;
         }
+        if !self.leave_provider_connection() {
+            return;
+        }
         self.close_sidebar_overlay();
         self.reasoning_picker_open = false;
         self.auto_attach = false;

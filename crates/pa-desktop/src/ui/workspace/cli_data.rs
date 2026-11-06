@@ -11,7 +11,6 @@ impl PrimeDesktopView {
             || !self.staged_attachments.is_empty()
             || !self.pending_attachments.is_empty()
             || self.drafts.values().any(|drafts| !drafts.is_empty())
-            || !self.api_key_input.text.is_empty()
             || self.harness_editor_open
     }
 
@@ -58,6 +57,7 @@ impl PrimeDesktopView {
         };
         let mut next = Self::new(options, self.preferences_dir.clone());
         next.waker.clone_from(&self.waker);
+        next.provider_browser = self.provider_browser;
         *self = next;
         self.waker.wake_by_ref();
     }

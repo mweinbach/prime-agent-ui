@@ -8,6 +8,7 @@ pub use image_preview::ImagePreview;
 pub mod harness_store;
 pub mod models;
 pub(crate) mod projects;
+pub(crate) mod provider_credentials;
 pub mod subagents;
 pub mod transcript;
 pub use subagents::RlmChildRow;
@@ -24,6 +25,7 @@ pub enum DraftKey {
 /// Active modal overlay in the desktop window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveModal {
+    ProviderConnect,
     ModelPicker,
     QuickSwitcher,
     SettingsAuth,

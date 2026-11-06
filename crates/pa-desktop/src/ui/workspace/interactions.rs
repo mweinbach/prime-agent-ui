@@ -20,7 +20,7 @@ impl PrimeDesktopView {
             &mut self.schedule_prompt_input,
             &mut self.mcp_server_input,
             &mut self.mcp_token_input,
-            &mut self.api_key_input,
+            &mut self.connection_input,
         ] {
             input.focused = false;
         }
@@ -29,10 +29,21 @@ impl PrimeDesktopView {
 
     pub(super) fn focus_active_surface(&mut self) {
         match self.active_modal {
+            Some(ActiveModal::ProviderConnect) => {
+                if self
+                    .provider_connection
+                    .as_ref()
+                    .is_none_or(|pane| pane.prompt.is_some())
+                {
+                    self.focus_input(|s| &mut s.connection_input);
+                } else {
+                    self.composer_input.focused = false;
+                }
+            }
             Some(ActiveModal::QuickSwitcher | ActiveModal::ModelPicker) => {
                 self.focus_input(|s| &mut s.modal_search_input);
             }
-            Some(ActiveModal::SettingsAuth) => self.focus_input(|s| &mut s.api_key_input),
+            Some(ActiveModal::SettingsAuth) => self.composer_input.focused = false,
             None => self.focus_input(|s| &mut s.composer_input),
         }
     }

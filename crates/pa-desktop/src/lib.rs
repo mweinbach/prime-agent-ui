@@ -11,6 +11,7 @@
 
 pub mod assets;
 pub mod bridge;
+pub(crate) mod provider_connect;
 mod shortcuts;
 pub mod state;
 pub mod theme;
@@ -24,7 +25,19 @@ use crate::ui::workspace::{LaunchOptions, PrimeDesktopView};
 
 fn open_workspace(options: LaunchOptions) -> PrimeDesktopView {
     let agent_dir = pa_types::platform::agent_dir().unwrap_or_else(|| ".prime/agent".into());
-    PrimeDesktopView::new(options, agent_dir)
+    let mut view = PrimeDesktopView::new(options, agent_dir);
+    if !rune::is_headless() {
+        // These challenges have already been checked against the expected provider host.
+        // Do not expose the challenge URL in a native error message or log.
+        view.provider_browser = Some(|raw| {
+            url::Url::parse(raw).is_ok_and(|url| {
+                url.scheme() == "https"
+                    && url.has_host()
+                    && open::that_detached(url.as_str()).is_ok()
+            })
+        });
+    }
+    view
 }
 
 /// Launch the Rune desktop window or run Rune's headless tools on the same view.

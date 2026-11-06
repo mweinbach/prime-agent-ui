@@ -12,7 +12,7 @@ impl PrimeDesktopView {
 
     #[must_use]
     pub fn model_setting_pending(&self) -> bool {
-        self.pending_model_setting.is_some()
+        self.pending_model_setting.is_some() || self.connected_catalog.is_some()
     }
 
     #[must_use]
@@ -143,17 +143,48 @@ impl PrimeDesktopView {
         provider: &str,
         model_id: &str,
     ) -> bool {
+        self.apply_model_selection(expected_session, provider, model_id, true)
+    }
+
+    pub(super) fn select_model_after_connect(
+        &mut self,
+        session: &str,
+        provider: &str,
+        model_id: &str,
+    ) -> bool {
+        self.apply_model_selection(session, provider, model_id, false)
+    }
+
+    pub(in crate::ui) fn can_connect_provider(&self, provider: &str) -> bool {
+        self.provider_auth
+            .iter()
+            .any(|row| row.provider_id == provider && (row.can_connect || row.can_edit_api_key))
+    }
+
+    fn apply_model_selection(
+        &mut self,
+        expected_session: &str,
+        provider: &str,
+        model_id: &str,
+        offer_connection: bool,
+    ) -> bool {
         if self.active_modal != Some(ActiveModal::ModelPicker)
             || !self.model_picker_ready()
             || self.session.active_session_id != expected_session
-            || !self.catalog_models.iter().any(|m| {
-                m.provider == provider
-                    && m.id == model_id
-                    && m.matches_query(&self.modal_search_input.text)
-                    && (!self.model_picker_configured_only || m.configured)
-            })
         {
             return false;
+        }
+        let Some(model) = self.catalog_models.iter().find(|m| {
+            m.provider == provider
+                && m.id == model_id
+                && m.matches_query(&self.modal_search_input.text)
+                && (!self.model_picker_configured_only || m.configured)
+        }) else {
+            return false;
+        };
+        if offer_connection && !model.configured && self.can_connect_provider(provider) {
+            self.connect_for_model(expected_session, provider, model_id);
+            return true;
         }
         if self.session.model_provider.as_deref() != Some(provider)
             || self.session.model_id.as_deref() != Some(model_id)
@@ -161,6 +192,7 @@ impl PrimeDesktopView {
             let request_id = uuid::Uuid::new_v4();
             self.pending_model_setting = Some(request_id);
             self.bridge.send(BridgeRequest::SetModel {
+                offer_connection,
                 request_id,
                 active_session_id: expected_session.into(),
                 provider: provider.into(),
@@ -203,6 +235,7 @@ mod tests {
             "model":{"provider":"example","id":"alpha"}, "thinkingLevel":"low"
         }));
         view.apply_bridge_event(BridgeEvent::ModelCatalogLoaded {
+            revision: 1,
             active_session_id: "attached".into(),
             data: json!({"models":[
                 {"provider":"example","id":"alpha","reasoning":true,

@@ -106,7 +106,9 @@ pub(super) fn handle_key(state: &mut Workspace, event: &KeyEvent, tx: &mut Tx) -
         .iter()
         .find(|b| b.key == *key && b.shift == event.mods.shift)
     {
-        if state.selected_attachment_preview().is_none() {
+        if state.selected_attachment_preview().is_none()
+            && state.active_modal != Some(ActiveModal::ProviderConnect)
+        {
             (binding.run)(state, tx);
         }
         return true;

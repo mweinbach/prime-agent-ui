@@ -5,6 +5,7 @@ use std::rc::Rc;
 
 use rune::{Cx, El, GrowthSpec, Key, ScrollSpec, Transition, col, el, row};
 
+mod providers;
 #[cfg(test)]
 mod tests;
 
@@ -75,10 +76,26 @@ impl PrimeDesktopView {
                 ActiveModal::QuickSwitcher => ("quick-switcher", self.command_picker(p)),
                 ActiveModal::ModelPicker => ("model-picker", self.model_picker(p)),
                 ActiveModal::SettingsAuth => ("settings", self.settings(p)),
+                ActiveModal::ProviderConnect => {
+                    ("connect-provider", self.provider_connect_sheet(p))
+                }
             };
             (
                 key,
-                content.w_full().max_w(610.0).modal(true, Self::close_modal),
+                content
+                    .w_full()
+                    .max_w(if modal == ActiveModal::ProviderConnect {
+                        488.0
+                    } else {
+                        610.0
+                    })
+                    .modal(true, |s: &mut Self| {
+                        if s.active_modal == Some(ActiveModal::ProviderConnect) {
+                            s.cancel_provider_connection();
+                        } else {
+                            s.close_modal();
+                        }
+                    }),
             )
         };
         card = card
@@ -201,78 +218,98 @@ impl PrimeDesktopView {
             items.push(ModelListRow::Choice(rank));
         }
 
-        let height = (100.0
-            + if self.toast.is_some() { 60.0 } else { 0.0 }
-            + items
+        let offer_connection = items.is_empty()
+            && self.modal_search_input.text.trim().is_empty()
+            && !self.catalog_models.iter().any(|model| model.configured);
+        let offline_error =
+            !self.daemon_connected && self.toast.as_ref().is_some_and(|(_, error)| *error);
+        let content_height = if items.is_empty() {
+            if offline_error { 0.0 } else { 50.0 }
+        } else {
+            items
                 .iter()
                 .map(|item| match item {
                     ModelListRow::Provider(_) => 28.0,
                     ModelListRow::Choice(_) => 34.0,
                 })
-                .sum::<f32>())
+                .sum::<f32>()
+        };
+        let height = (100.0
+            + content_height
+            + if offer_connection { 40.0 } else { 0.0 }
+            + if self.toast.is_some() { 60.0 } else { 0.0 })
         .clamp(164.0, 452.0);
-        let result =
-            if !self.daemon_connected && self.toast.as_ref().is_some_and(|(_, error)| *error) {
-                // The daemon error is the empty state until it is dismissed.
-                el().h(0.0)
-            } else if items.is_empty() {
-                let message = if !self.daemon_connected {
-                    "Connect to the daemon to load models."
-                } else if self.model_setting_pending() {
-                    "Applying selection…"
-                } else if !self.model_picker_ready() || !self.model_catalog_loaded() {
-                    "Loading models…"
-                } else if !self.modal_search_input.text.trim().is_empty() {
-                    "No matching models."
-                } else if self.model_picker_configured_only {
-                    "No models from configured providers."
-                } else {
-                    "The daemon returned no models."
-                };
-                picker_empty(message, p)
+        let result = if offline_error {
+            // The daemon error is the empty state until it is dismissed.
+            el().h(0.0)
+        } else if items.is_empty() {
+            let message = if !self.daemon_connected {
+                "Connect to the daemon to load models."
+            } else if self.model_setting_pending() {
+                "Applying selection…"
+            } else if !self.model_picker_ready() || !self.model_catalog_loaded() {
+                "Loading models…"
+            } else if !self.modal_search_input.text.trim().is_empty() {
+                "No matching models."
+            } else if self.model_picker_configured_only {
+                "No models from configured providers."
             } else {
-                let rows = Rc::new(items);
-                let keys = Rc::clone(&rows);
-                let choices_for_keys = Rc::clone(&choices);
-                let list = col()
-                    .key("catalog-rows")
-                    .growth(GrowthSpec::default())
-                    .virtual_rows(
-                        rows.len(),
-                        34.0,
-                        move |_: &Self, i| {
-                            match keys[i] {
-                                ModelListRow::Provider(rank) => {
-                                    format!("provider-{}", choices_for_keys[rank].provider)
-                                }
-                                ModelListRow::Choice(rank) => choices_for_keys[rank].key(),
-                            }
-                            .into()
-                        },
-                        move |s: &Self, i| {
-                            let rank = match rows[i] {
-                                ModelListRow::Provider(rank) | ModelListRow::Choice(rank) => rank,
-                            };
-                            // A retained builder can run after a daemon refresh but before this
-                            // snapshot gets replaced. Never reinterpret its old catalog indices.
-                            let Some(index) = choices[rank].resolve(&s.catalog_models) else {
-                                return el();
-                            };
-                            match rows[i] {
-                                ModelListRow::Provider(_) => {
-                                    provider_heading(&s.catalog_models[index], &s.catalog_models, p)
-                                }
-                                ModelListRow::Choice(_) => {
-                                    s.model_option(index, Some(rank) == selected, &session, p)
-                                }
-                            }
-                        },
-                    );
-                picker_viewport()
-                    .role("listbox")
-                    .label("Models")
-                    .child(list)
+                "The daemon returned no models."
             };
+            picker_empty(message, p)
+        } else {
+            let rows = Rc::new(items);
+            let keys = Rc::clone(&rows);
+            let choices_for_keys = Rc::clone(&choices);
+            let list = col()
+                .key("catalog-rows")
+                .growth(GrowthSpec::default())
+                .virtual_rows(
+                    rows.len(),
+                    34.0,
+                    move |_: &Self, i| {
+                        match keys[i] {
+                            ModelListRow::Provider(rank) => {
+                                format!("provider-{}", choices_for_keys[rank].provider)
+                            }
+                            ModelListRow::Choice(rank) => choices_for_keys[rank].key(),
+                        }
+                        .into()
+                    },
+                    move |s: &Self, i| {
+                        let rank = match rows[i] {
+                            ModelListRow::Provider(rank) | ModelListRow::Choice(rank) => rank,
+                        };
+                        // A retained builder can run after a daemon refresh but before this
+                        // snapshot gets replaced. Never reinterpret its old catalog indices.
+                        let Some(index) = choices[rank].resolve(&s.catalog_models) else {
+                            return el();
+                        };
+                        match rows[i] {
+                            ModelListRow::Provider(_) => {
+                                provider_heading(&s.catalog_models[index], s, p)
+                            }
+                            ModelListRow::Choice(_) => {
+                                s.model_option(index, Some(rank) == selected, &session, p)
+                            }
+                        }
+                    },
+                );
+            picker_viewport()
+                .role("listbox")
+                .label("Models")
+                .child(list)
+        };
+        let result = if offer_connection {
+            col().items_start().pb(8.0).child(result).child(
+                button("model-connect-provider", "Connect provider…", p)
+                    .ml(8.0)
+                    .fill(p.bg_code)
+                    .on_press(|s: &mut Self| s.open_provider_connect("")),
+            )
+        } else {
+            result
+        };
         let panel = col()
             .h(height)
             .min_h(0.0)
@@ -670,10 +707,27 @@ impl PrimeDesktopView {
             .child(motion)
             .child(data)
             .child(connection)
-            .child(label("Provider credentials", 14.0, 600.0, p.text_primary))
+            .child(
+                row()
+                    .w_full()
+                    .center_y()
+                    .gap(8.0)
+                    .child(label("Provider credentials", 14.0, 600.0, p.text_primary).grow(1.0))
+                    .child(
+                        button("settings-connect-provider", "Connect provider…", p)
+                            .fill(p.bg_code)
+                            .on_press(|s: &mut Self| s.open_provider_connect("")),
+                    ),
+            )
             .children(
                 self.provider_auth
                     .iter()
+                    .filter(|item| {
+                        item.configured
+                            || (!item.can_connect
+                                && !item.can_edit_api_key
+                                && item.auth_kind == "Saved credential")
+                    })
                     .map(|item| self.credential_row(item, p)),
             );
         col()
@@ -695,18 +749,17 @@ impl PrimeDesktopView {
     }
 
     fn credential_row(&self, item: &ProviderAuthItem, p: Palette) -> El {
-        let selected = item.can_edit_api_key && self.selected_auth_provider == item.provider_id;
         let mut summary = row()
-            .key(format!("auth-prov-{}", item.provider_id))
+            .w_full()
             .center_y()
-            .gap(6.0)
+            .gap(7.0)
             .child(
                 col()
                     .grow(1.0)
                     .min_w(0.0)
                     .gap(2.0)
                     .child(label(&item.display_name, 13.0, 500.0, p.text_primary))
-                    .child(label(&item.hint, 11.0, 400.0, p.text_secondary).wrap()),
+                    .child(label(&item.hint, 11.0, 400.0, p.text_secondary).wrap_anywhere()),
             )
             .child(label(
                 &item.auth_kind,
@@ -718,75 +771,34 @@ impl PrimeDesktopView {
                     p.text_muted
                 },
             ));
-        if item.can_edit_api_key {
-            let pid = item.provider_id.clone();
-            summary = summary
-                .role("button")
-                .label(&item.display_name)
-                .focusable(true)
-                .cursor(rune::Cursor::Pointer)
-                .hover(p.bg_hover)
-                .on_press(move |s: &mut Self| {
-                    if s.selected_auth_provider != pid {
-                        s.api_key_input.replace_text("");
-                    }
-                    s.selected_auth_provider.clone_from(&pid);
-                    s.focus_input(|s| &mut s.api_key_input);
-                });
+        if !self.auth_write_pending && (item.can_connect || item.can_edit_api_key) {
+            let provider = item.provider_id.clone();
+            let title = if item.has_stored_api_key {
+                "Edit…"
+            } else if item.auth_kind == "OAuth" {
+                "Reconnect…"
+            } else {
+                "Connect…"
+            };
+            summary = summary.child(
+                button(format!("auth-prov-{}", item.provider_id), title, p)
+                    .label(format!("{title} {}", item.display_name))
+                    .on_press(move |view: &mut Self| view.open_provider_connect(&provider)),
+            );
         }
-        let mut card = settings_group(p).child(summary);
-        if selected {
-            let has_key = !self.api_key_input.text.trim().is_empty();
-            let input = field("api-key", &self.api_key_input, "API key", p, |s| {
-                &mut s.api_key_input
-            })
-            .single_line()
-            .grow(1.0)
-            .min_w(0.0)
-            .on_submit(|s: &mut Self, _| {
-                if !s.api_key_input.text.trim().is_empty() && !s.auth_write_pending {
-                    s.save_selected_provider_key();
-                }
-            });
-            let mut editor = row()
-                .h(32.0)
-                .gap(6.0)
-                .px(7.0)
-                .center_y()
-                .radius(6.0)
-                .border(1.0, p.border_subtle)
-                .child(input);
-            if self.auth_write_pending {
-                editor = editor.child(label("Updating…", 12.0, 400.0, p.text_muted));
-            } else if has_key {
-                editor = editor.child(
-                    button("save-provider-key-btn", "Save key", p)
-                        .on_press(Self::save_selected_provider_key),
-                );
-            } else if item.has_stored_api_key {
-                editor = editor.child(
-                    button("remove-provider-key-btn", "Remove key…", p).on_press(|s: &mut Self| {
-                        let provider = s.selected_auth_provider.clone();
-                        let dir = s.agent_dir.clone();
-                        s.confirm(
-                            format!("Remove the saved API key for {provider}?"),
-                            "Remove key",
-                            move |s| {
-                                if s.selected_auth_provider == provider
-                                    && s.agent_dir == dir
-                                    && s.api_key_input.text.trim().is_empty()
-                                    && !s.auth_write_pending
-                                {
-                                    s.save_selected_provider_key();
-                                }
-                            },
-                        );
-                    }),
-                );
-            }
-            card = card.border(1.0, p.accent).child(editor);
+        if !self.auth_write_pending && item.can_edit_api_key && item.has_stored_api_key {
+            let provider = item.provider_id.clone();
+            summary = summary.child(
+                button(
+                    format!("remove-provider-key-{}", item.provider_id),
+                    "Remove key…",
+                    p,
+                )
+                .label(format!("Remove saved key for {}", item.display_name))
+                .on_press(move |view: &mut Self| view.confirm_remove_provider_key(&provider)),
+            );
         }
-        card
+        settings_group(p).child(summary)
     }
 }
 
@@ -849,7 +861,7 @@ fn model_key(model: &CatalogModel) -> String {
     format!("model-option-{}", model.selector())
 }
 
-fn provider_heading(model: &CatalogModel, catalog: &[CatalogModel], p: Palette) -> El {
+fn provider_heading(model: &CatalogModel, view: &PrimeDesktopView, p: Palette) -> El {
     let mut header = row().h(28.0).center_y().gap(8.0).px(8.0).child(
         label(model.provider_display(), 11.5, 600.0, p.text_secondary)
             .grow(1.0)
@@ -857,13 +869,19 @@ fn provider_heading(model: &CatalogModel, catalog: &[CatalogModel], p: Palette) 
             .truncate(),
     );
     // Different Google backends can share a display name and advertise the same model.
-    if catalog.iter().any(|other| {
+    if view.catalog_models.iter().any(|other| {
         other.provider != model.provider && other.provider_display() == model.provider_display()
     }) {
         header = header.child(label(&model.provider, 10.5, 400.0, p.text_muted).truncate());
     }
-    if !model.configured {
-        header = header.child(label("Unconfigured", 10.5, 400.0, p.text_muted));
+    if !model.configured && view.can_connect_provider(&model.provider) {
+        let provider = model.provider.clone();
+        header = header.child(
+            button(format!("connect-group-{provider}"), "Connect", p)
+                .label(format!("Connect {}", model.provider_display()))
+                .h(23.0)
+                .on_press(move |s: &mut PrimeDesktopView| s.open_provider_connect(&provider)),
+        );
     }
     header.help(&model.provider)
 }
@@ -933,6 +951,12 @@ fn switch_rows(view: &PrimeDesktopView) -> Vec<SwitchRow> {
     let actions = [
         ("act-new", "New chat in this project", "⌘N", "Ctrl+N"),
         ("act-model", "Switch model", "⌘M", "Ctrl+M"),
+        (
+            "act-login",
+            "Connect an inference provider…",
+            "/login",
+            "/login",
+        ),
         ("act-folder", "Add project…", "⇧⌘O", "Ctrl+Shift+O"),
         (
             "act-harness",

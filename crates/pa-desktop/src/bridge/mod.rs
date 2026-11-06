@@ -109,6 +109,7 @@ pub enum BridgeRequest {
         active_session_id: String,
         provider: String,
         model_id: String,
+        offer_connection: bool,
     },
     SetThinkingLevel {
         request_id: uuid::Uuid,
@@ -144,6 +145,10 @@ pub enum BridgeRequest {
     },
     AbortBash {
         active_session_id: String,
+    },
+    RefreshConnectedCatalog {
+        active_session_id: String,
+        request: uuid::Uuid,
     },
     RefreshInspector {
         active_session_id: String,
@@ -285,12 +290,25 @@ pub enum BridgeEvent {
         requested: String,
         actual: String,
     },
+    ModelCredentialsRequired {
+        active_session_id: String,
+        request_id: uuid::Uuid,
+        provider: String,
+        model_id: String,
+    },
     ModelSettingFinished {
         active_session_id: String,
         request_id: uuid::Uuid,
         state: std::result::Result<Value, String>,
     },
+    ConnectedCatalog {
+        revision: u64,
+        active_session_id: String,
+        request: uuid::Uuid,
+        data: Option<Value>,
+    },
     ModelCatalogLoaded {
+        revision: u64,
         active_session_id: String,
         data: Value,
     },
@@ -356,6 +374,10 @@ impl BridgeHandle {
             },
             evt_rx,
         ))
+    }
+
+    pub(crate) fn spawn_io(&self, work: impl std::future::Future<Output = ()> + Send + 'static) {
+        self.runtime.spawn(work);
     }
 
     pub(crate) fn spawn_blocking(&self, work: impl FnOnce() + Send + 'static) {
@@ -686,6 +708,7 @@ async fn run_worker_loop(
 ) {
     let mut active_client: Option<RawClient> = None;
     let mut tasks = tokio::task::JoinSet::new();
+    let mut catalog_revision = 0_u64;
 
     loop {
         let req = tokio::select! {
@@ -768,6 +791,13 @@ async fn run_worker_loop(
                 }
             }
             other => {
+                if matches!(
+                    other,
+                    BridgeRequest::RefreshInspector { .. }
+                        | BridgeRequest::RefreshConnectedCatalog { .. }
+                ) {
+                    catalog_revision += 1;
+                }
                 let transition = matches!(
                     other,
                     BridgeRequest::AttachSession { .. }
@@ -791,7 +821,19 @@ async fn run_worker_loop(
                 let tx = evt_tx.clone();
                 tasks.spawn(async move {
                     let outcome = if let Some(client) = client {
-                        dispatch_request(&client, other, &tx).await
+                        dispatch_request(&client, other, &tx, catalog_revision).await
+                    } else if let BridgeRequest::RefreshConnectedCatalog {
+                        active_session_id,
+                        request,
+                    } = other
+                    {
+                        let _ = tx.unbounded_send(BridgeEvent::ConnectedCatalog {
+                            revision: catalog_revision,
+                            active_session_id,
+                            request,
+                            data: None,
+                        });
+                        Ok(())
                     } else {
                         let reason = "Not connected. Refresh to reconnect.";
                         restore_undispatched_prompt(other, &tx, reason);
@@ -951,6 +993,7 @@ async fn dispatch_request(
     client: &RawClient,
     req: BridgeRequest,
     evt_tx: &futures_mpsc::UnboundedSender<BridgeEvent>,
+    catalog_revision: u64,
 ) -> Result<()> {
     let std_timeout = Duration::from_secs(20);
     match req {
@@ -1252,21 +1295,42 @@ async fn dispatch_request(
             active_session_id,
             provider,
             model_id,
+            offer_connection,
         } => {
-            check_daemon_ok(
-                client
-                    .request(
-                        DaemonCommand::SetModel {
-                            id: None,
-                            active_session_id: active_session_id.clone(),
-                            provider,
-                            model_id,
-                            rest: Map::new(),
-                        },
-                        std_timeout,
-                    )
-                    .await?,
-            )?;
+            let response = client
+                .request(
+                    DaemonCommand::SetModel {
+                        id: None,
+                        active_session_id: active_session_id.clone(),
+                        provider: provider.clone(),
+                        model_id: model_id.clone(),
+                        rest: Map::new(),
+                    },
+                    std_timeout,
+                )
+                .await?;
+            // An expired or removed credential can race the catalog we showed.
+            // Only offer login for the provider the user actually selected.
+            if !response.success
+                && matches!(
+                    &response.error_info,
+                    Some(pa_types::daemon::DaemonErrorInfo::ModelProviderUnauthenticated { provider: rejected })
+                        if *rejected == provider
+                )
+            {
+                anyhow::ensure!(
+                    offer_connection,
+                    "The daemon still needs credentials for {provider}. Check this provider in Settings."
+                );
+                let _ = evt_tx.unbounded_send(BridgeEvent::ModelCredentialsRequired {
+                    active_session_id,
+                    request_id,
+                    provider,
+                    model_id,
+                });
+                return Ok(());
+            }
+            check_daemon_ok(response)?;
             report_model_setting(client, active_session_id, request_id, evt_tx).await?;
         }
         BridgeRequest::SetThinkingLevel {
@@ -1438,22 +1502,22 @@ async fn dispatch_request(
                     .await?,
             )?;
         }
+        BridgeRequest::RefreshConnectedCatalog {
+            active_session_id,
+            request,
+        } => {
+            let data = fetch_model_catalog(client, &active_session_id).await;
+            let _ = evt_tx.unbounded_send(BridgeEvent::ConnectedCatalog {
+                revision: catalog_revision,
+                active_session_id,
+                request,
+                data,
+            });
+        }
         BridgeRequest::RefreshInspector { active_session_id } => {
-            let response = client
-                .request(
-                    DaemonCommand::GetModelCatalog {
-                        id: None,
-                        active_session_id: active_session_id.clone(),
-                        rest: Map::new(),
-                    },
-                    std_timeout,
-                )
-                .await;
-            let data = response
-                .ok()
-                .filter(|resp| resp.success)
-                .and_then(|resp| resp.data);
+            let data = fetch_model_catalog(client, &active_session_id).await;
             let _ = evt_tx.unbounded_send(BridgeEvent::ModelCatalogLoaded {
+                revision: catalog_revision,
                 active_session_id: active_session_id.clone(),
                 data: data.unwrap_or(Value::Null),
             });
@@ -1867,6 +1931,21 @@ async fn attach_and_hydrate(
     }
 
     Ok(())
+}
+
+async fn fetch_model_catalog(client: &RawClient, active_session_id: &str) -> Option<Value> {
+    let response = client
+        .request(
+            DaemonCommand::GetModelCatalog {
+                id: None,
+                active_session_id: active_session_id.to_owned(),
+                rest: Map::new(),
+            },
+            Duration::from_secs(20),
+        )
+        .await
+        .ok()?;
+    response.success.then_some(response.data).flatten()
 }
 
 /// The daemon can clamp reasoning when either setting changes. Read back the

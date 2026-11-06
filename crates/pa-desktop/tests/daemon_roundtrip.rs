@@ -177,6 +177,7 @@ impl IsolatedDaemon {
     }
 }
 
+#[track_caller]
 fn wait_for_workspace(
     desktop: &mut Runtime<PrimeDesktopView>,
     predicate: impl Fn(&PrimeDesktopView) -> bool,
@@ -605,6 +606,87 @@ fn choose_model_and_reasoning_before_sending_the_first_prompt() {
     });
     assert_eq!(desktop.state.session.active_session_id, session_id);
     assert_eq!(desktop.state.composer_input.text, "Unsent plan");
+    assert!(!desktop.state.session.entries.iter().any(|e| matches!(
+        e,
+        TranscriptEntry::User { .. } | TranscriptEntry::Assistant { .. }
+    )));
+}
+
+#[test]
+fn connecting_a_provider_retries_the_selected_model_in_the_same_unsent_chat() {
+    let daemon = IsolatedDaemon::spawn();
+    // A local model for a built-in, key-only provider exercises the CLI's auth store.
+    // A new custom provider would require an apiKey in models.json itself.
+    let models = serde_json::json!({"providers": {
+        "local-writer": {
+            "api":"openai-completions", "baseUrl":"http://127.0.0.1:9/v1", "apiKey":"local-fixture",
+            "models":[{"id":"writer","name":"Offline Writer"}]
+        },
+        "mistral": {
+            "api":"openai-completions", "baseUrl":"http://127.0.0.1:9/v1",
+            "models":[{"id":"editor","name":"Offline Editor"}]
+        }
+    }});
+    std::fs::write(daemon.agent_dir.join("models.json"), models.to_string()).unwrap();
+    let settings = serde_json::json!({"defaultProvider":"local-writer","defaultModel":"writer"});
+    std::fs::write(daemon.agent_dir.join("settings.json"), settings.to_string()).unwrap();
+    set_provider_api_key(&daemon.agent_dir, "mistral", "initial-test-value").unwrap();
+
+    let mut desktop = daemon.open_workspace(&daemon.agent_dir);
+    wait_for_workspace(&mut desktop, |w| w.daemon_connected);
+    click(&mut desktop, "composer-input");
+    press(&mut desktop, Key::Text("/login".into()));
+    press(&mut desktop, Key::Enter);
+    assert!(desktop.find("connect-provider").is_some());
+    click(&mut desktop, "provider-connect-cancel");
+    assert!(desktop.state.session.active_session_id.is_empty());
+    click(&mut desktop, "composer-input");
+    press(&mut desktop, Key::Text("Unsent edit".into()));
+    click(&mut desktop, "composer-model-pill");
+    wait_for_workspace(&mut desktop, |w| {
+        w.model_picker_ready()
+            && w.catalog_models
+                .iter()
+                .any(|m| m.provider == "mistral" && m.id == "editor" && m.configured)
+    });
+    let sid = desktop.state.session.active_session_id.clone();
+
+    // A second CLI can remove a credential after the desktop has rendered its catalog.
+    set_provider_api_key(&daemon.agent_dir, "mistral", "").unwrap();
+    click(&mut desktop, "modal-search");
+    press(&mut desktop, Key::Text("Offline Editor".into()));
+    press(&mut desktop, Key::Enter);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        desktop.frame(1. / 60.);
+        if desktop.find("provider-connect-input").is_some() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon refusal did not open API-key entry"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    click(&mut desktop, "provider-connect-input");
+    press(&mut desktop, Key::Text("replacement-test-value".into()));
+    assert!(!desktop.elements().iter().any(|e| {
+        e.text
+            .as_deref()
+            .is_some_and(|s| s.contains("replacement-test-value"))
+    }));
+    press(&mut desktop, Key::Enter);
+    wait_for_workspace(&mut desktop, |w| {
+        w.session.model_provider.as_deref() == Some("mistral")
+            && w.session.model_id.as_deref() == Some("editor")
+            && w.model_picker_ready()
+    });
+    assert_eq!(desktop.state.session.active_session_id, sid);
+    assert_eq!(desktop.state.composer_input.text, "Unsent edit");
+    let stored: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(daemon.agent_dir.join("auth.json")).unwrap())
+            .unwrap();
+    assert_eq!(stored["mistral"]["key"], "replacement-test-value");
     assert!(!desktop.state.session.entries.iter().any(|e| matches!(
         e,
         TranscriptEntry::User { .. } | TranscriptEntry::Assistant { .. }

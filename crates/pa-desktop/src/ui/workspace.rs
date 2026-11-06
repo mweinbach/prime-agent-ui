@@ -12,6 +12,7 @@ mod interactions;
 mod layout;
 mod model_picker;
 mod projects;
+mod provider_connect;
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use rune::TextEdit;
 use crate::bridge::{BridgeEvent, BridgeHandle, BridgeRequest, socket_path_for_target};
 use crate::state::harness_store::{
     HarnessEntryDraft, HarnessSnapshot, ProviderAuthItem, delete_harness_entry,
-    load_provider_auth_items, set_provider_api_key, upsert_harness_entry,
+    load_provider_auth_items, upsert_harness_entry,
 };
 use crate::state::models::{CatalogModel, parse_model_catalog};
 use crate::state::transcript::AttachedSessionState;
@@ -76,12 +77,21 @@ pub struct PrimeDesktopView {
     history: Vec<String>,
     history_cursor: Option<usize>,
     history_draft: String,
+    // Drop cancels an outstanding login before the Tokio runtime can wait on a
+    // credential write that is still queued behind the CLI's file lock.
+    login_attempt: Option<provider_connect::LoginAttempt>,
     pub bridge: BridgeHandle,
     pub prefs: DesktopPreferences,
     pub explicit_socket: Option<PathBuf>,
     pub agent_dir: PathBuf,
     pub(super) preferences_dir: PathBuf,
     pub(super) auth_write_pending: bool,
+    /// Native windows install the OS opener; in-memory and headless views record Rune URL requests.
+    pub(crate) provider_browser: Option<fn(&str) -> bool>,
+    pub(in crate::ui) provider_connection: Option<crate::provider_connect::ConnectionPane>,
+    pub(in crate::ui) connection_input: TextEdit,
+    connection_origin: Option<provider_connect::ConnectionOrigin>,
+    connected_catalog: Option<provider_connect::ConnectedCatalog>,
     pub working_cwd: String,
 
     pub daemon_connected: bool,
@@ -109,6 +119,7 @@ pub struct PrimeDesktopView {
     pub(in crate::ui) reasoning_picker_open: bool,
     pending_model_setting: Option<uuid::Uuid>,
     catalog_loaded: bool,
+    catalog_revision: u64,
 
     pub rlm_children: Subagents,
     pub rlm_max_depth: Option<u64>,
@@ -126,7 +137,6 @@ pub struct PrimeDesktopView {
     pub harness_editing_id: Option<String>,
 
     pub provider_auth: Vec<ProviderAuthItem>,
-    pub selected_auth_provider: String,
 
     pub active_modal: Option<ActiveModal>,
     pub(super) modal_selected_idx: usize,
@@ -157,7 +167,6 @@ pub struct PrimeDesktopView {
     pub schedule_prompt_input: TextEdit,
     pub mcp_server_input: TextEdit,
     pub mcp_token_input: TextEdit,
-    pub api_key_input: TextEdit,
 }
 
 impl PrimeDesktopView {
@@ -226,6 +235,12 @@ impl PrimeDesktopView {
             agent_dir,
             preferences_dir,
             auth_write_pending: false,
+            provider_browser: None,
+            provider_connection: None,
+            connection_input: TextEdit::new("").secure(),
+            connection_origin: None,
+            login_attempt: None,
+            connected_catalog: None,
             working_cwd,
             daemon_connected: false,
             daemon_socket_display: sock_path.to_string_lossy().to_string(),
@@ -249,6 +264,7 @@ impl PrimeDesktopView {
             reasoning_picker_open: false,
             pending_model_setting: None,
             catalog_loaded: false,
+            catalog_revision: 0,
             rlm_children: Subagents::default(),
             rlm_max_depth: None,
             shells: Vec::new(),
@@ -263,7 +279,6 @@ impl PrimeDesktopView {
             harness_editor_kind: RefinementKind::Memory,
             harness_editing_id: None,
             provider_auth: Vec::new(),
-            selected_auth_provider: "prime-inference".to_string(),
             active_modal: options.initial_modal,
             modal_selected_idx: 0,
             modal_model_key: None,
@@ -292,7 +307,6 @@ impl PrimeDesktopView {
             schedule_prompt_input: TextEdit::new(""),
             mcp_server_input: TextEdit::new(""),
             mcp_token_input: TextEdit::new("").secure(),
-            api_key_input: TextEdit::new("").secure(),
         };
         instance.reload_local_stores();
         instance.focus_active_surface();
@@ -559,6 +573,29 @@ impl PrimeDesktopView {
                     self.toast = Some((format!("Session closed ({reason})"), false));
                 }
             }
+            BridgeEvent::ModelCredentialsRequired {
+                active_session_id,
+                request_id,
+                provider,
+                model_id,
+            } => {
+                if self.pending_model_setting == Some(request_id)
+                    && self.session.active_session_id == active_session_id
+                {
+                    self.pending_model_setting = None;
+                    if self.active_modal.is_none()
+                        && self.confirm.is_none()
+                        && self.selected_attachment_preview().is_none()
+                    {
+                        self.connect_for_model(&active_session_id, &provider, &model_id);
+                    } else {
+                        self.toast = Some((
+                            format!("Connect {provider} from the model picker to use this model."),
+                            true,
+                        ));
+                    }
+                }
+            }
             BridgeEvent::ModelSettingFinished {
                 active_session_id,
                 request_id,
@@ -577,20 +614,24 @@ impl PrimeDesktopView {
                     }
                 }
             }
-            BridgeEvent::ModelCatalogLoaded {
+            BridgeEvent::ConnectedCatalog {
+                revision,
+                request,
                 active_session_id,
                 data,
             } => {
-                if self.session.active_session_id != active_session_id {
-                    return;
+                self.finish_connected_catalog(request, &active_session_id, revision, data);
+            }
+            BridgeEvent::ModelCatalogLoaded {
+                revision,
+                active_session_id,
+                data,
+            } => {
+                if self.session.active_session_id == active_session_id
+                    && revision >= self.catalog_revision
+                {
+                    self.accept_model_catalog(revision, &data);
                 }
-                self.catalog_loaded = true;
-                if !data.is_null() {
-                    let (models, providers) = parse_model_catalog(&data);
-                    self.catalog_models = models;
-                    self.configured_providers = providers;
-                }
-                self.validate_reasoning_picker();
             }
             BridgeEvent::SubagentUpdated {
                 active_session_id,
@@ -658,6 +699,15 @@ impl PrimeDesktopView {
         }
     }
 
+    fn accept_model_catalog(&mut self, revision: u64, data: &serde_json::Value) {
+        if !data.is_null() {
+            (self.catalog_models, self.configured_providers) = parse_model_catalog(data);
+            self.catalog_revision = revision;
+        }
+        self.catalog_loaded = true;
+        self.validate_reasoning_picker();
+    }
+
     pub fn reload_local_stores(&mut self) {
         self.store_request += 1;
         let request = self.store_request;
@@ -689,6 +739,7 @@ impl PrimeDesktopView {
     }
 
     fn reset_session(&mut self) {
+        self.connected_catalog = None;
         self.close_attachment_preview();
         self.follow_tail = true;
         self.scroll_to_tail = false;
@@ -696,6 +747,7 @@ impl PrimeDesktopView {
         self.telemetry = SessionTelemetry::default();
         self.pending_model_setting = None;
         self.catalog_loaded = false;
+        self.catalog_revision = 0;
         self.catalog_models.clear();
         self.configured_providers.clear();
         self.rlm_children = Subagents::default();
@@ -781,7 +833,7 @@ impl PrimeDesktopView {
             || trimmed
                 .strip_prefix("/btw")
                 .is_some_and(|rest| rest.starts_with(char::is_whitespace));
-        let local = matches!(trimmed.as_str(), "/harness" | "/model");
+        let local = matches!(trimmed.as_str(), "/harness" | "/model" | "/login");
         let session_command = btw
             || trimmed.starts_with('!')
             || matches!(
@@ -834,6 +886,10 @@ impl PrimeDesktopView {
         match trimmed.as_str() {
             "/new" => {
                 self.start_fresh_session();
+                return;
+            }
+            "/login" => {
+                self.open_provider_connect("");
                 return;
             }
             "/model" => {
@@ -1046,6 +1102,13 @@ impl PrimeDesktopView {
     }
 
     pub fn open_modal(&mut self, modal: ActiveModal) {
+        if modal == ActiveModal::ProviderConnect {
+            self.open_provider_connect("");
+            return;
+        }
+        if !self.leave_provider_connection() {
+            return;
+        }
         self.reasoning_picker_open = false;
         if modal == ActiveModal::ModelPicker {
             self.prepare_model_catalog();
@@ -1065,8 +1128,14 @@ impl PrimeDesktopView {
     }
 
     pub fn close_modal(&mut self) {
+        if self.active_modal == Some(ActiveModal::ProviderConnect) {
+            self.cancel_provider_connection();
+            return;
+        }
+        if !self.leave_provider_connection() {
+            return;
+        }
         self.active_modal = None;
-        self.api_key_input.replace_text("");
         self.focus_active_surface();
     }
 
@@ -1075,6 +1144,7 @@ impl PrimeDesktopView {
         match action_id {
             "act-new" => self.start_fresh_session(),
             "act-model" => self.open_modal(ActiveModal::ModelPicker),
+            "act-login" => self.open_provider_connect(""),
             "act-folder" => self.prompt_choose_project_dir(),
             "act-harness" => self.open_harness_tab(),
             "act-compact" => self.trigger_compact(),
@@ -1215,45 +1285,6 @@ impl PrimeDesktopView {
                 self.toast = Some((format!("{err:#}"), true));
             }
         }
-    }
-
-    pub fn save_selected_provider_key(&mut self) {
-        if self.auth_write_pending {
-            return;
-        }
-        let provider = self.selected_auth_provider.clone();
-        let key = self.api_key_input.text.trim().to_owned();
-        let removing = key.is_empty();
-        if !self.provider_auth.iter().any(|item| {
-            item.provider_id == provider
-                && item.can_edit_api_key
-                && (!removing || item.has_stored_api_key)
-        }) {
-            return;
-        }
-        self.auth_write_pending = true;
-        self.api_key_input.replace_text("");
-        let dir = self.agent_dir.clone();
-        self.background.run(&self.bridge, move || {
-            let ok = set_provider_api_key(&dir, &provider, &key).is_ok();
-            move |view: &mut Self| {
-                view.auth_write_pending = false;
-                view.reload_local_stores();
-                if ok && !view.session.active_session_id.is_empty() {
-                    view.bridge.send(BridgeRequest::RefreshInspector {
-                        active_session_id: view.session.active_session_id.clone(),
-                    });
-                }
-                let message = if !ok {
-                    format!("Could not update the CLI credential for {provider}. Its file may be unreadable or the record may have changed.")
-                } else if removing {
-                    format!("Removed the stored key for {provider}.")
-                } else {
-                    format!("Saved the key for {provider}.")
-                };
-                view.toast = Some((message, !ok));
-            }
-        });
     }
 }
 

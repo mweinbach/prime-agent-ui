@@ -5,11 +5,10 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use pa_core::auth::{
-    AuthCredential, AuthStorage, AuthStorageBackend, AuthStorageData, FileAuthStorageBackend,
-    GITHUB_COPILOT_PROVIDER_ID, NoOAuth, OPENAI_CODEX_PROVIDER_ID, PRIME_AGENT_TRACES_PROVIDER_ID,
-    PRIME_INFERENCE_PROVIDER_ID, SERPER_CREDENTIAL_ID,
+    AuthCredential, AuthStorage, AuthStorageData, GITHUB_COPILOT_PROVIDER_ID, NoOAuth,
+    OPENAI_CODEX_PROVIDER_ID, PRIME_INFERENCE_PROVIDER_ID, PrimeTeamAssignment,
 };
 use pa_core::models::parse_models_config;
 use pa_core::refinement::{
@@ -19,6 +18,10 @@ use pa_core::refinement::{
 };
 
 use super::models::provider_display_name;
+use super::provider_credentials::{
+    CredentialSlot, LoginCredential, editable_record, is_model_provider, is_oauth_only,
+    read_document, supports_browser,
+};
 
 /// Redacted summary of the provider credentials shared with the CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +31,7 @@ pub struct ProviderAuthItem {
     pub configured: bool,
     pub auth_kind: String,
     pub hint: String,
+    pub can_connect: bool,
     pub can_edit_api_key: bool,
     pub has_stored_api_key: bool,
 }
@@ -283,34 +287,10 @@ const DEFAULT_PROVIDERS: &[&str] = &[
     "xai",
 ];
 
-fn is_model_provider(provider_id: &str) -> bool {
-    !provider_id.is_empty()
-        && !matches!(
-            provider_id,
-            SERPER_CREDENTIAL_ID | PRIME_AGENT_TRACES_PROVIDER_ID
-        )
-        && !provider_id.starts_with("mcp:")
-}
-
-fn is_oauth_only(provider_id: &str) -> bool {
-    matches!(
-        provider_id,
-        OPENAI_CODEX_PROVIDER_ID | GITHUB_COPILOT_PROVIDER_ID
-    )
-}
-
 /// Read credential metadata without creating files, resolving command keys, or refreshing OAuth.
 #[must_use]
 pub fn load_provider_auth_items(agent_dir: &Path) -> Vec<ProviderAuthItem> {
-    // The shared writer replaces auth.json atomically. A read needs no lock file
-    // or initializer, unlike the CLI auth backend's read operation.
-    let doc: Option<AuthStorageData> = match std::fs::read(agent_dir.join("auth.json")) {
-        Ok(raw) => serde_json::from_slice(&raw).ok(),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Some(AuthStorageData::default())
-        }
-        Err(_) => None,
-    };
+    let doc = read_document(agent_dir).ok();
     let models = std::fs::read_to_string(agent_dir.join("models.json"))
         .ok()
         .and_then(|raw| parse_models_config(&raw).ok());
@@ -320,6 +300,7 @@ pub fn load_provider_auth_items(agent_dir: &Path) -> Vec<ProviderAuthItem> {
     let additional_ids: BTreeSet<&str> = doc
         .iter()
         .flat_map(|doc| doc.0.keys().map(String::as_str))
+        .chain(pa_ai::models_generated::get_providers())
         .chain(
             models
                 .iter()
@@ -337,6 +318,9 @@ pub fn load_provider_auth_items(agent_dir: &Path) -> Vec<ProviderAuthItem> {
             let has_record = doc
                 .as_ref()
                 .is_some_and(|doc| doc.get(provider_id).is_some());
+            let editable =
+                doc.is_some() && (!has_record || editable_record(provider_id, stored.as_ref()));
+            let can_connect = editable && supports_browser(provider_id);
             let has_stored_api_key = matches!(stored, Some(AuthCredential::ApiKey { .. }));
             let config = models
                 .as_ref()
@@ -347,10 +331,7 @@ pub fn load_provider_auth_items(agent_dir: &Path) -> Vec<ProviderAuthItem> {
             let display_name = config
                 .and_then(|config| config.name.as_deref())
                 .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| match provider_id {
-                    GITHUB_COPILOT_PROVIDER_ID => "GitHub Copilot",
-                    _ => provider_display_name(provider_id),
-                });
+                .unwrap_or_else(|| provider_display_name(provider_id));
             let environment = env.get_auth_status(provider_id).label.map(|label| {
                 let hint = if label == "ambient credentials" {
                     "From this app's environment".to_string()
@@ -363,9 +344,16 @@ pub fn load_provider_auth_items(agent_dir: &Path) -> Vec<ProviderAuthItem> {
                 Some(AuthCredential::ApiKey { .. }) => {
                     Some((true, "API key", "Saved by Prime Agent".to_string()))
                 }
-                Some(AuthCredential::Oauth { .. }) => {
-                    Some((true, "OAuth", "Manage this sign-in in the CLI".to_string()))
-                }
+                Some(AuthCredential::Oauth { .. }) => Some((
+                    true,
+                    "OAuth",
+                    if can_connect {
+                        "Signed in with this provider"
+                    } else {
+                        "Manage this sign-in in the CLI"
+                    }
+                    .to_string(),
+                )),
                 Some(AuthCredential::McpStaticToken { .. }) => Some((
                     true,
                     "Saved token",
@@ -394,8 +382,8 @@ pub fn load_provider_auth_items(agent_dir: &Path) -> Vec<ProviderAuthItem> {
                     )
                 } else if doc.is_none() {
                     (false, "Unavailable", "Cannot read auth.json".to_string())
-                } else if is_oauth_only(provider_id) || provider_id == PRIME_INFERENCE_PROVIDER_ID {
-                    (false, "Not configured", "Use /login in the CLI".to_string())
+                } else if can_connect {
+                    (false, "Not configured", "Connect your account".to_string())
                 } else {
                     (false, "Not configured", "No saved credential".to_string())
                 }
@@ -406,7 +394,8 @@ pub fn load_provider_auth_items(agent_dir: &Path) -> Vec<ProviderAuthItem> {
                 configured,
                 auth_kind: auth_kind.to_string(),
                 hint,
-                can_edit_api_key: doc.is_some()
+                can_connect,
+                can_edit_api_key: editable
                     && !is_oauth_only(provider_id)
                     && (!has_record || has_stored_api_key),
                 has_stored_api_key,
@@ -422,40 +411,23 @@ pub fn load_provider_auth_items(agent_dir: &Path) -> Vec<ProviderAuthItem> {
 /// Returns an error if the target is not an API-key provider, contains a non-key
 /// record, or the locked update fails.
 pub fn set_provider_api_key(agent_dir: &Path, provider_id: &str, api_key: &str) -> Result<()> {
-    if !is_model_provider(provider_id) || is_oauth_only(provider_id) {
-        bail!("Manage this credential in the CLI");
+    let key = api_key.trim();
+    let slot = CredentialSlot::read(agent_dir, provider_id)?;
+    if key.is_empty() {
+        return slot.remove_api_key();
     }
-    let backend = FileAuthStorageBackend::new(agent_dir.join("auth.json"));
-    let trimmed = api_key.trim();
-    backend.with_lock(&mut |current: Option<String>| {
-        let raw = current.context("Cannot read auth.json; no credentials were changed")?;
-        let mut doc: AuthStorageData = serde_json::from_str(&raw)
-            .map_err(|_| anyhow::anyhow!("Cannot parse auth.json; no credentials were changed"))?;
-        // Recheck under the lock: the CLI may have signed in after Settings was opened.
-        if doc.get(provider_id).is_some() {
-            let Some(AuthCredential::ApiKey { key, .. }) = doc.credential(provider_id) else {
-                bail!("Manage this saved credential in the CLI; no credentials were changed");
-            };
-            if !trimmed.is_empty() && key == trimmed {
-                return Ok(((), None));
-            }
-        } else if trimmed.is_empty() {
-            return Ok(((), None));
+    let credential = if provider_id == PRIME_INFERENCE_PROVIDER_ID {
+        LoginCredential::Prime {
+            api_key: key.to_owned(),
+            team: PrimeTeamAssignment::PreserveWhenKeyMatches,
         }
-        if trimmed.is_empty() {
-            doc.remove(provider_id);
-        } else {
-            doc.insert(
-                provider_id,
-                &AuthCredential::ApiKey {
-                    key: trimmed.to_string(),
-                    prime_team: None,
-                },
-            );
-        }
-        let serialized = serde_json::to_string_pretty(&doc)?;
-        Ok(((), Some(format!("{serialized}\n"))))
-    })
+    } else {
+        LoginCredential::Provider(AuthCredential::ApiKey {
+            key: key.to_owned(),
+            prime_team: None,
+        })
+    };
+    slot.save_checked(credential, || true)
 }
 
 #[cfg(test)]
@@ -496,12 +468,17 @@ mod tests {
                 display_name: "OpenAI Codex".to_string(),
                 configured: true,
                 auth_kind: "OAuth".to_string(),
-                hint: "Manage this sign-in in the CLI".to_string(),
+                hint: "Signed in with this provider".to_string(),
+                can_connect: true,
                 can_edit_api_key: false,
                 has_stored_api_key: false,
             }
         );
         assert!(row("custom-saved").has_stored_api_key);
+        assert!(!row("custom-saved").can_edit_api_key);
+        assert!(row("groq").can_edit_api_key);
+        assert!(!row("groq").can_connect);
+        assert!(row("github-copilot").can_connect);
         assert_eq!(row("custom-config").auth_kind, "Models config");
         assert!(!rows.iter().any(|item| item.provider_id == "mcp:tool"));
         let rendered = format!("{rows:?}");
